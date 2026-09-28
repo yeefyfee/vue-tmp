@@ -1,0 +1,164 @@
+/**
+ * ${businessName} 服务层
+ */
+import { Injectable } from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { In, Repository } from "typeorm";
+import { ${entityName} } from "./entities/${tableKebab}.entity";
+import { ${entityName}QueryDto } from "./dto/${entityKebab}-query.dto";
+import { Create${entityName}Dto } from "./dto/create-${entityKebab}.dto";
+import { Update${entityName}Dto } from "./dto/update-${entityKebab}.dto";
+
+@Injectable()
+export class ${entityName}Service {
+  constructor(
+    @InjectRepository(${entityName})
+    private readonly ${entityLowerCamel}Repository: Repository<${entityName}>
+  ) {}
+
+  /**
+   * ${businessName} 分页列表
+   */
+  async get${entityName}Page(query: ${entityName}QueryDto) {
+    const pageNumSafe = Number(query.pageNum) > 0 ? Number(query.pageNum) : 1;
+    const pageSizeSafe = Number(query.pageSize) > 0 ? Number(query.pageSize) : 10;
+
+    const queryBuilder = this.${entityLowerCamel}Repository.createQueryBuilder("${entityLowerCamel}");
+    queryBuilder.where("${entityLowerCamel}.isDeleted = :isDeleted", { isDeleted: 0 });
+#foreach($fieldConfig in $fieldConfigs)
+#if($fieldConfig.isShowInQuery)
+    if (
+      query.${fieldConfig.fieldName} !== undefined &&
+      query.${fieldConfig.fieldName} !== null &&
+      query.${fieldConfig.fieldName} !== ""
+    ) {
+  #if($fieldConfig.queryType == "LIKE")
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} LIKE :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: "%" + query.${fieldConfig.fieldName} + "%",
+      });
+  #elseif($fieldConfig.queryType == "LIKE_LEFT")
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} LIKE :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: "%" + query.${fieldConfig.fieldName},
+      });
+  #elseif($fieldConfig.queryType == "LIKE_RIGHT")
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} LIKE :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName} + "%",
+      });
+  #elseif($fieldConfig.queryType == "IN")
+      const ${fieldConfig.fieldName}List = Array.isArray(query.${fieldConfig.fieldName})
+        ? query.${fieldConfig.fieldName}
+        : String(query.${fieldConfig.fieldName}).split(",").filter(Boolean);
+      if (${fieldConfig.fieldName}List.length) {
+        queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} IN (:...${fieldConfig.fieldName}List)", {
+          ${fieldConfig.fieldName}List,
+        });
+      }
+  #elseif($fieldConfig.queryType == "BETWEEN")
+      const ${fieldConfig.fieldName}Range = query.${fieldConfig.fieldName};
+      if (Array.isArray(${fieldConfig.fieldName}Range) && ${fieldConfig.fieldName}Range.length === 2) {
+        queryBuilder.andWhere(
+          "${entityLowerCamel}.${fieldConfig.fieldName} BETWEEN :${fieldConfig.fieldName}Start AND :${fieldConfig.fieldName}End",
+          {
+            ${fieldConfig.fieldName}Start: ${fieldConfig.fieldName}Range[0],
+            ${fieldConfig.fieldName}End: ${fieldConfig.fieldName}Range[1],
+          }
+        );
+      }
+  #elseif($fieldConfig.queryType == "GT")
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} > :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
+      });
+  #elseif($fieldConfig.queryType == "GE")
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} >= :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
+      });
+  #elseif($fieldConfig.queryType == "LT")
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} < :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
+      });
+  #elseif($fieldConfig.queryType == "LE")
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} <= :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
+      });
+  #elseif($fieldConfig.queryType == "NE")
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} != :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
+      });
+  #else
+      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} = :${fieldConfig.fieldName}", {
+        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
+      });
+  #end
+    }
+#end
+#end
+
+    queryBuilder.orderBy("${entityLowerCamel}.id", "DESC");
+    const [list, total] = await queryBuilder
+      .skip((pageNumSafe - 1) * pageSizeSafe)
+      .take(pageSizeSafe)
+      .getManyAndCount();
+
+    return { list, total };
+  }
+
+  /**
+   * 获取 ${businessName} 表单数据
+   */
+  async get${entityName}FormData(id: string) {
+    return await this.${entityLowerCamel}Repository.findOne({
+      where: { id: id.toString(), isDeleted: 0 }
+    });
+  }
+
+  /**
+   * 新增 ${businessName}
+   */
+  async create(formData: Create${entityName}Dto) {
+    const entity = this.${entityLowerCamel}Repository.create({
+      ...formData,
+      isDeleted: 0,
+    });
+
+    await this.${entityLowerCamel}Repository.save(entity);
+    return entity;
+  }
+
+  /**
+   * 修改 ${businessName}
+   */
+  async update(id: string, formData: Update${entityName}Dto) {
+    const entity = await this.${entityLowerCamel}Repository.findOne({
+      where: { id: id.toString(), isDeleted: 0 }
+    });
+    if (!entity) {
+      return false;
+    }
+
+    Object.assign(entity, formData);
+
+    await this.${entityLowerCamel}Repository.save(entity);
+    return true;
+  }
+
+  /**
+   * 删除 ${businessName}
+   */
+  async delete(ids: string) {
+    const idList = ids
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+
+    if (!idList.length) {
+      return false;
+    }
+
+    await this.${entityLowerCamel}Repository.update(
+      { id: In(idList) },
+      { isDeleted: 1 }
+    );
+
+    return true;
+  }
+}

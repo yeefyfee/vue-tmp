@@ -1,0 +1,73 @@
+# 牛来后台管理系统(Nest.js) 本地依赖服务
+# 使用方法：在 docker 目录下执行 docker compose up -d
+# 说明：Nest 后端使用 MySQL + TypeORM + Redis + MinIO，不使用 MongoDB
+
+networks:
+  niulai-nest:
+    driver: bridge
+
+services:
+  # MySQL 数据库（对应 .env.dev 中的 MYSQL_* 配置）
+  mysql:
+    image: mysql:8.0
+    container_name: niulai-nest-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    environment:
+      - TZ=Asia/Shanghai
+      # 与 .env.dev 的 MYSQL_PASSWORD 保持一致
+      - MYSQL_ROOT_PASSWORD=root123
+      - MYSQL_DATABASE=niulai_admin
+    volumes:
+      - ./mysql/data:/var/lib/mysql
+      # 首次启动时自动导入建库建表脚本（仅数据目录为空时执行）
+      - ../sql/mysql:/docker-entrypoint-initdb.d:ro
+    ports:
+      - 3306:3306
+    networks:
+      - niulai-nest
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -proot123 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Redis 缓存
+  # 密码需与 .env.dev 的 REDIS_PASSWORD 保持一致
+  redis:
+    image: redis:7.2.3
+    container_name: niulai-nest-redis
+    restart: unless-stopped
+    command: redis-server --requirepass 123456 --appendonly no
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./redis/data:/data
+    ports:
+      - 6379:6379
+    networks:
+      - niulai-nest
+
+  # MinIO 对象存储
+  # 账号需与 .env.dev 的 OSS_MINIO_* 配置保持一致
+  minio:
+    image: minio/minio:RELEASE.2024-07-16T23-46-41Z
+    container_name: niulai-nest-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - TZ=Asia/Shanghai
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - ./minio/data:/data
+      - ./minio/config:/root/.minio
+    ports:
+      - 9000:9000
+      - 9001:9001
+    networks:
+      - niulai-nest

@@ -1,0 +1,29 @@
+import { IsOptional, IsString, IsNumber, IsArray } from "class-validator";
+import { Transform } from "class-transformer";
+import { BaseQueryDto } from "@/common/dto/base-query.dto";
+
+/**
+ * ${businessName} 查询参数
+ */
+export class ${entityName}QueryDto extends BaseQueryDto {
+#foreach($fieldConfig in $fieldConfigs)
+#if($fieldConfig.isShowInQuery)
+#if("$!fieldConfig.fieldComment" != "")
+  /** ${fieldConfig.fieldComment} */
+#end
+  @IsOptional()
+#if($fieldConfig.queryType == "BETWEEN")
+  @IsArray()
+  @IsString({ each: true })
+  ${fieldConfig.fieldName}?: string[];
+#elseif($fieldConfig.tsType == "number")
+  @Transform(({ value }) => (value === undefined ? undefined : Number(value)))
+  @IsNumber()
+  ${fieldConfig.fieldName}?: number;
+#else
+  @IsString()
+  ${fieldConfig.fieldName}?: string;
+#end
+#end
+#end
+}
