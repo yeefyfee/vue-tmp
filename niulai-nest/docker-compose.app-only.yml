@@ -1,0 +1,114 @@
+# ==============================================================================
+# 牛来后台管理系统 —— 只部署应用容器（复用服务器上【已经存在】的 MySQL / Redis / MinIO）
+# ------------------------------------------------------------------------------
+# 什么时候用它：
+#   - 数据库已经存在（宿主机原生安装、别的 compose 项目、云数据库 RDS……）
+#   - 库里有业务数据，不想要一套新的空库
+#   - 服务器资源紧张，不想为同一个项目再跑一套 MySQL + Redis + MinIO
+#
+# 用法：
+#   cd niulai-nest
+#   docker compose -f docker-compose.app-only.yml up -d --build
+#
+# 它【不会】创建、也不会初始化任何数据库 —— 库表结构请先准备好（见下方核对清单）。
+#
+# ------------------------------------------------------------------------------
+# 地址怎么写（关键：容器里的 127.0.0.1 指向容器自己，不是宿主机）
+# ------------------------------------------------------------------------------
+#   ① 数据库在【宿主机】上（最常见）
+#        → 无需改动，默认值已用 host.docker.internal（下方 extra_hosts 已做映射）
+#        → 但 .env.prod 里写的是 127.0.0.1，会被下面的 environment 覆盖，不用手改
+#
+#   ② 数据库在【另一个 compose 项目的网络里】
+#        → 填对方容器名，例如 MYSQL_HOST=mysql、REDIS_HOST=redis
+#        → 并取消文件末尾 networks.external 的注释，改成对方项目的网络名，
+#          同时把 app 的 networks 指向它
+#
+#   ③ 云数据库（RDS / 云 Redis / 云 MinIO）
+#        → 直接填内网或公网域名，把 extra_hosts 那段删掉即可
+#
+# ------------------------------------------------------------------------------
+# ⚠️⚠️ 已有数据的库，千万不要拿 sql/mysql/*.sql 去导入 ⚠️⚠️
+#   那三个脚本是【破坏性】的，共含 24 条 DROP TABLE IF EXISTS：
+#     niulai_admin.sql    → DROP 16 张 sys_*/gen_* 表
+#     storage_module.sql  → DROP 4 张 storage_* 表
+#     suno_module.sql     → DROP 4 张 suno_* 表
+#   对已有数据的库执行 = 这 24 张表的数据全部丢失且无法恢复。
+#   导入前务必先 mysqldump 备份（命令见根目录 README「七、生产部署」）。
+#
+# ------------------------------------------------------------------------------
+# 启动前核对清单
+# ------------------------------------------------------------------------------
+#   [ ] MYSQL_DB 对应的库已存在，且表结构已就绪（TypeORM 的 synchronize 是 false，
+#       它不会自动建表；表缺失只会表现为运行时报错，不会自动补）
+#       核对： SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='niulai_admin';
+#              -- 应有 24 张表（16 系统表 + 4 storage_* + 4 suno_*）
+#   [ ] 应用能连上数据库。宿主机原生安装的 MySQL，root 往往是 root@localhost +
+#       auth_socket，容器连不进去，需要单独建用户：
+#         CREATE USER 'niulai'@'%' IDENTIFIED BY '强密码';
+#         GRANT ALL PRIVILEGES ON niulai_admin.* TO 'niulai'@'%';
+#         FLUSH PRIVILEGES;
+#       然后把 .env.prod 的 MYSQL_USER / MYSQL_PASSWORD 改成这个账号。
+#       （若数据库本身就是官方 mysql 镜像起的，它已建好 root@'%'，可直接用 root）
+#   [ ] Redis 的密码与 .env.prod 的 REDIS_PASSWORD 一致（有密码就填，没密码留空）
+#   [ ] 若要用文件上传/下载，OSS_MINIO_ENDPOINT 要能从容器访问到，
+#       且 OSS_MINIO_CUSTOM_DOMAIN 配成浏览器可访问的域名
+#   [ ] 数据库字符集为 utf8mb4（否则中文与 emoji 可能报错）
+# ==============================================================================
+
+name: niulai-app
+
+services:
+  # ---------------------------- 应用（NestJS） ----------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: niulai-nest:latest
+    container_name: niulai-app
+    restart: unless-stopped
+    init: true
+
+    # 非敏感的通用配置来自 .env.prod（JWT、OSS 类型、SESSION_TYPE 等）
+    env_file:
+      - .env.prod
+
+    # 连接地址在这里覆盖 —— 优先级高于 env_file，所以 .env.prod 里的 127.0.0.1 会被替换掉。
+    # 想改连接地址，直接在 shell 里 export 同名变量，或写到 niulai-nest/.env 里即可。
+    environment:
+      NODE_ENV: prod # 决定加载 .env.prod，务必保留
+      APP_PORT: 8000
+
+      MYSQL_HOST: ${MYSQL_HOST:-host.docker.internal}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-yee.123456}
+
+      REDIS_HOST: ${REDIS_HOST:-host.docker.internal}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+      OSS_MINIO_ENDPOINT: ${OSS_MINIO_ENDPOINT:-http://host.docker.internal:9000}
+
+    # Linux 上让容器内能解析 host.docker.internal（Docker Desktop 已内置，写上无害）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    ports:
+      # 若同机已有 Nginx / 1Panel 反代，建议改为 "127.0.0.1:8000:8000" 只对本机开放
+      - "${APP_PORT:-8000}:8000"
+
+    volumes:
+      # 日志持久化（winston 写入 logs/，见 src/app.module.ts）
+      - ./logs:/app/logs
+
+    # 注意：这里【没有 depends_on】—— 依赖在 compose 之外，无需等待
+    # networks:
+    #   - niulai-ext
+
+# 若数据库在另一个 compose 项目的网络里，取消下面注释并把 niulai-ext 换成对方网络名：
+# networks:
+#   niulai-ext:
+#     external: true
+#     name: <对方 compose 项目的网络名>
+#     # 查网络名： docker network ls
+#     # 查某容器在哪个网络： docker inspect <容器名> --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'

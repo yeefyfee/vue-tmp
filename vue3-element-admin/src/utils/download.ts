@@ -71,3 +71,25 @@ export function downloadFile(response: { data: any; headers: any }, customFileNa
     throw error;
   }
 }
+
+/**
+ * 通过公开 URL 下载文件（用于第三方资源，如音频/图片）
+ *
+ * 直接使用 a[download] 触发；跨域资源若被浏览器忽略 download 属性，
+ * 则退回新窗口打开由用户保存。
+ *
+ * @param url 文件地址
+ * @param fileName 保存的文件名
+ */
+export function downloadByUrl(url: string, fileName: string): void {
+  if (!url) return;
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.target = "_blank";
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}

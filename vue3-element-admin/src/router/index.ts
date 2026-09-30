@@ -66,6 +66,42 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
     ],
   },
+
+  // Suno 音乐模块（独立业务域）
+  // 说明：该分组的显示由后端菜单控制（SUNO 角色仅绑定 Suno 菜单），
+  // 这里以常量路由兜底，保证后端菜单未初始化时功能可直接访问。
+  {
+    path: "/suno",
+    component: Layout,
+    redirect: "/suno/studio",
+    meta: { title: "Suno 音乐", icon: "microphone" },
+    children: [
+      {
+        path: "studio",
+        name: "SunoStudio",
+        component: () => import("@/views/suno/studio/index.vue"),
+        meta: { title: "创作台", icon: "magic-stick", keepAlive: true },
+      },
+      {
+        path: "task",
+        name: "SunoTask",
+        component: () => import("@/views/suno/task/index.vue"),
+        meta: { title: "任务中心", icon: "list", keepAlive: true },
+      },
+      {
+        path: "asset",
+        name: "SunoAsset",
+        component: () => import("@/views/suno/asset/index.vue"),
+        meta: { title: "我的作品", icon: "headset", keepAlive: true },
+      },
+      {
+        path: "config",
+        name: "SunoConfig",
+        component: () => import("@/views/suno/config/index.vue"),
+        meta: { title: "接入配置", icon: "setting" },
+      },
+    ],
+  },
 ];
 
 /**

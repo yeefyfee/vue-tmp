@@ -1,6 +1,19 @@
 # 牛来后台管理系统(Nest.js) 本地依赖服务
 # 使用方法：在 docker 目录下执行 docker compose up -d
 # 说明：Nest 后端使用 MySQL + TypeORM + Redis + MinIO，不使用 MongoDB
+#
+# ⚠️ 本机【已经有】MySQL / Redis 时不要启动本文件：
+#   - 本文件映射 3306 / 6379，与已有容器必然端口冲突，两者不能同时启动
+#   - 直接复用已有实例即可，只要 .env.dev 的 MYSQL_DB / MYSQL_PASSWORD /
+#     REDIS_PASSWORD / REDIS_DB 与那个实例的实际配置一致
+#   - 先查现有容器与端口：
+#       docker ps --format '{{.Names}} | {{.Image}} | {{.Ports}}'
+#       docker exec <mysql容器> mysql -uroot -p<密码> -e "show databases;"
+#   - 只有在「依赖服务已存在」的服务器上部署应用时，才用上一级的
+#     docker-compose.app-only.yml（仅起 app，连接外部数据库）
+#
+# ⚠️ 挂载的 ../sql/mysql/*.sql 含 24 条 DROP TABLE IF EXISTS，是破坏性脚本：
+#   仅对空数据目录安全。往已有数据的库导入会清空 24 张表。
 
 networks:
   niulai-nest:

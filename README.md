@@ -26,12 +26,16 @@ vue3-template/
 │  ├─ .env.production           # 生产环境变量
 │  └─ vite.config.ts            # 含 /dev-api 代理配置（仅开发环境生效）
 ├─ niulai-nest/                 # 后端项目
-│  ├─ src/                      # 业务源码
-│  ├─ sql/mysql/                # 数据库初始化脚本
-│  ├─ docker/docker-compose.yml # 本地依赖服务（MySQL/Redis/MinIO）
-│  ├─ Dockerfile                # 后端镜像构建
-│  ├─ .env                      # 基础环境变量（被优先加载）
-│  └─ .env.dev                  # 开发环境变量
+│  ├─ src/                      # 业务源码（含 src/codegen/templates 代码生成模板）
+│  ├─ sql/mysql/                # 数据库初始化脚本（3 个，按文件名顺序导入）
+│  ├─ Dockerfile                # 后端生产镜像（四阶段构建）
+│  ├─ .dockerignore             # 构建上下文排除规则
+│  ├─ docker-compose.prod.yml   # 生产一键部署：app + MySQL + Redis + MinIO（从零开始）
+│  ├─ docker-compose.app-only.yml # 生产部署：仅 app，复用已有数据库/缓存/存储
+│  ├─ docker/docker-compose.yml # 本地开发依赖服务（仅 MySQL/Redis/MinIO，无应用）
+│  ├─ .env                      # 基础环境变量（仅 APP_PORT）
+│  ├─ .env.dev                  # 开发环境变量
+│  └─ .env.prod                 # 生产环境变量（不进镜像，由 env_file 注入）
 ├─ deploy/
 │  ├─ nginx.conf                # 裸装 Nginx 生产配置（静态托管 + /prod-api 反代）
 │  └─ 1panel.md                 # 1Panel 面板部署指南
@@ -243,17 +247,122 @@ pm2 save
 - 设置 `TYPEORM_LOGGING=false`，避免 SQL 日志过大；
 - 用 Nginx 反向代理 8000 端口并配置 HTTPS。
 
-**方式二：Docker 部署**
+**方式二：Docker 部署（推荐）**
 
-项目根目录已提供 `Dockerfile`（两阶段构建，最终镜像 `node /app/main.js`，暴露 8000）：
+`niulai-nest/` 下提供了完整的容器化部署文件。**先判断数据库是否已经存在**，再选对应文件：
+
+| 文件 | 作用 | 适用场景 |
+| --- | --- | --- |
+| `Dockerfile` | 四阶段构建：装依赖 → `nest build` → 裁剪为生产依赖 → 运行镜像（`node dist/main.js`） | 通用 |
+| `.dockerignore` | 排除 `node_modules` / `dist` / `logs` / `.env.prod` 等，缩小构建上下文并避免密钥进镜像 | 通用 |
+| `docker-compose.prod.yml` | app + MySQL + Redis + MinIO 编排，含健康检查、数据卷、自动导入 SQL | **情形 A**：全新部署，服务器上没有任何数据库 |
+| `docker-compose.app-only.yml` | 仅 app，连接**外部已有**的 MySQL / Redis / MinIO，不建库、不导入 SQL | **情形 B/C**：数据库已存在（含业务数据 / 别的项目在用 / 云 RDS） |
 
 ```bash
 cd niulai-nest
-docker build -t niulai-nest:latest .
-docker run -d --name niulai-nest -p 8000:8000 --env-file .env.prod niulai-nest:latest
+
+# 情形 A：全新部署（会自动建库建表）
+docker compose -f docker-compose.prod.yml up -d --build
+
+# 情形 B/C：数据库已存在，只跑应用
+docker compose -f docker-compose.app-only.yml up -d --build
+
+docker compose -f <上面选的那个文件> ps                # 查看状态
+docker compose -f <上面选的那个文件> logs -f app       # 跟踪应用日志
 ```
 
-> Dockerfile 在构建阶段会 `COPY .env .`，运行时以 `.env` + `NODE_ENV` 决定的环境文件为准，请确保容器内的配置指向**容器可达**的 MySQL / Redis 地址（不能是 `localhost`）。
+> 本地开发用的 `docker/docker-compose.yml` 只起依赖服务、**不含应用**；
+> 生产部署用上面两个文件之一，三者用途不同，不要混用。
+
+**容器化的四个关键点（都已写进文件，改配置前请先看）**
+
+1. **`NODE_ENV=prod` 不能少** —— 应用按 `NODE_ENV` 决定加载哪个 env 文件
+   （`src/app.module.ts:48`：`` `.env.${process.env.NODE_ENV || "dev"}` ``），
+   不传就会去找 `.env.dev`。
+2. **`.env.prod` 由 `env_file` 注入，不打进镜像** —— 镜像内只保留非敏感的 `.env`（仅含 `APP_PORT`）。
+   变量优先级为 `compose 的 environment` > `env_file` > 镜像内 `.env`，
+   因此 compose 里把 `MYSQL_HOST` / `REDIS_HOST` / `OSS_MINIO_ENDPOINT`
+   覆盖成了容器服务名（`mysql` / `redis` / `minio`）—— 容器里写 `127.0.0.1` 必失败。
+3. **代码生成器的 `.vm` 模板必须单独复制** —— `resolveBootTemplatePath` 按
+   `<cwd>/src/codegen/templates` 解析（`src/codegen/codegen.service.ts:704`），
+   而 `nest build` 只编译 `.ts`，`.vm` 不会进 `dist`。Dockerfile 里已单独 `COPY`，
+   漏掉会导致「代码生成」功能报 `Codegen template not found`。
+   **原生部署时同样要注意：只在服务器上放 `dist/` 而不放 `src/codegen/templates/`，一样会报这个错。**
+4. **MySQL / Redis / MinIO 默认不映射端口** —— 仅在容器网络内互通，避免 3306/6379 暴露公网。
+   需要本机连数据库调试时，临时加 `"127.0.0.1:3306:3306"`。
+
+**首次启动会自动导入数据库**：数据卷为空时，`sql/mysql/` 下的三个脚本按文件名顺序执行 ——
+`niulai_admin.sql`（建库 + 16 张系统表）、`storage_module.sql`（4 张表）、`suno_module.sql`（4 张表）。
+后两个脚本没有 `USE` 语句，靠 MySQL 官方 entrypoint 自动带上的 `--database=$MYSQL_DATABASE` 落库，
+所以 compose 里的 `MYSQL_DATABASE` 必须是 `niulai_admin`。
+
+> ⚠️ **这三个脚本是破坏性的** —— 共含 **24 条 `DROP TABLE IF EXISTS`**
+> （16 张 `sys_*`/`gen_*` + 4 张 `storage_*` + 4 张 `suno_*`）。
+> 官方 entrypoint 只在**数据目录为空**时执行一次，正常重启不会重复触发，所以全新部署是安全的；
+> 但**绝不要把它们导进已有数据的库** —— 那是 24 张表的数据全部丢失且无法恢复。
+
+#### 数据库已经存在怎么办（情形 B / C）
+
+服务器上已经有 MySQL（宿主机原生安装、别的 compose 项目、云数据库 RDS）时，
+**不要**用 `docker-compose.prod.yml`（它会另起一套空库），改用 `docker-compose.app-only.yml`：
+
+```bash
+cd niulai-nest
+docker compose -f docker-compose.app-only.yml up -d --build
+```
+
+它只跑 app 容器，连接地址默认指向 `host.docker.internal`（即宿主机），
+覆盖 `environment` 里的 `MYSQL_HOST` 即可改指向别处（shell 里 `export` 或写进 `niulai-nest/.env`）：
+
+```bash
+# 例：数据库在另一个 compose 网络里
+export MYSQL_HOST=mysql REDIS_HOST=redis
+# 例：云数据库
+export MYSQL_HOST=rm-xxxx.mysql.rds.aliyuncs.com
+```
+
+启动前要核对四件事：
+
+| 核对项 | 说明 |
+| --- | --- |
+| **库与表已就绪** | `typeorm.config.ts` 里 `synchronize: false`，**不会自动建表**。查表数：`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='niulai_admin';` 应为 24 张 |
+| **账号允许远程连接** | 宿主机原生安装的 MySQL，`root` 通常是 `root@localhost` + `auth_socket`，**容器连不进去**，需单独建用户：`CREATE USER 'niulai'@'%' IDENTIFIED BY '强密码'; GRANT ALL PRIVILEGES ON niulai_admin.* TO 'niulai'@'%'; FLUSH PRIVILEGES;`（若数据库本身是官方 `mysql` 镜像起的，它已建好 `root@'%'`，可直接用 root） |
+| **Redis 密码一致** | 有密码就填 `REDIS_PASSWORD`，没密码留空 —— 与你在用的 Redis 实际配置对齐 |
+| **字符集为 utf8mb4** | 否则中文与 emoji 写入可能报错 |
+
+另外两点容易踩的：
+
+- **entrypoint 判断"是否初始化过"只看数据目录里有没有 `mysql` 系统库，不看目标库在不在** ——
+  所以数据卷非空时，即便 `MYSQL_DB` 指向的库还没建，初始化脚本也不会跑，需要手工建库。
+- **只想跑应用但沿用 `prod.yml`**（情形 D）：把 `mysql` 服务里挂载 `./sql/mysql` 的那一行注释掉即可。
+
+**库里只缺部分表**（情形 C，例如只有系统表、缺 `storage_*` / `suno_*`）：仍用 `app-only` 起应用，
+再**手工、按需**导入缺的那一个脚本 —— 导入前先备份，并确认该脚本要建的 4 张表在库里确实不存在：
+
+```bash
+# 1) 先备份（务必）
+mysqldump -h 127.0.0.1 -uroot -p --single-transaction --routines --triggers \
+  niulai_admin > backup_$(date +%F_%H%M).sql
+
+# 2) 确认目标表不存在
+mysql -h 127.0.0.1 -uroot -p -e \
+  "SELECT table_name FROM information_schema.tables WHERE table_schema='niulai_admin' AND table_name LIKE 'storage_%';"
+
+# 3) 备份确认无误后，只导入缺的那一个
+mysql -h 127.0.0.1 -uroot -p --default-character-set=utf8mb4 niulai_admin < sql/mysql/storage_module.sql
+```
+
+**密码要保持两处一致**：`.env.prod` 与 `docker-compose.prod.yml` 里 `${XXX:-默认值}` 的默认值
+（compose 的变量替换不会读取 `env_file`，只读 shell 环境变量或 compose 同目录的 `.env`）。
+
+**与服务器上已有的 Nginx / 1Panel 配合**：若 OpenResty 是容器，它无法访问宿主机的 `127.0.0.1:8000`，
+两种做法二选一 —— ① app 端口映射保持 `0.0.0.0`（默认），Nginx 反代到 **宿主机 IP:8000**；
+② 把 app 容器加入 1Panel 的 docker 网络，Nginx 直接反代 `niulai-app:8000`。
+
+**MinIO 的一个坑**：`OSS_MINIO_ENDPOINT` 决定的是**后端访问 MinIO** 的地址（容器内用 `http://minio:9000`），
+但这个地址也会拼进返回给前端的文件 URL —— 浏览器解析不了容器名。
+需要放文件给外部访问时，请设置 `.env.prod` 的 `OSS_MINIO_CUSTOM_DOMAIN` 指向公网域名并另配反代，
+或把 MinIO 的 9000 端口映射出来。
 
 ### 前端
 
@@ -342,6 +451,10 @@ nginx -t && nginx -s reload
 | 后端 | `pnpm build` | 构建到 `dist/` |
 | 后端 | `pnpm start:prod` | 运行构建产物 |
 | 后端 | `pnpm test` / `pnpm test:e2e` | 单元测试 / 端到端测试 |
+| 后端 | `docker compose -f docker-compose.prod.yml up -d --build` | 生产一键部署（含 app） |
+| 后端 | `docker compose -f docker-compose.prod.yml logs -f app` | 跟踪应用日志 |
+| 后端 | `docker compose -f docker-compose.prod.yml down` | 停止（保留数据卷） |
+| 本地依赖 | `cd niulai-nest/docker && docker compose up -d` | 只起 MySQL / Redis / MinIO |
 
 ---
 
@@ -369,3 +482,9 @@ nginx -t && nginx -s reload
    - `src/auth/wxma-auth.controller.ts` 前缀重复，实际路径为 `/api/v1/api/v1/wxma/auth`；
    - 后端缺少 `tenants` / `apps` 控制器，前端对应页面需保持 `VITE_APP_TENANT_ENABLED=false`；
    - Swagger 实际路径为 `/api/v1/api-docs`（受全局前缀影响），与部分文档描述不一致。
+9. **代码生成功能在生产环境会报 `Codegen template not found`**（不阻断其它功能）：
+   `src/codegen/codegen.service.ts:704` 用 `path.resolve(process.cwd(), "src", "codegen", "templates", ...)`
+   定位 Velocity 模板，而 `nest build` 只编译 `.ts`，`.vm` 模板不会进 `dist`。
+   本地 dev 因项目根有 `src/` 所以正常，一旦只把 `dist/` 部署上去就会失败。
+   处理方式二选一：① 部署时把 `src/codegen/templates/` 一并放到工作目录下（Dockerfile 已自动处理）；
+   ② 或给 `nest-cli.json` 加 `compilerOptions.assets` 把模板带进 `dist`，并让代码回退到 `__dirname` 查找。

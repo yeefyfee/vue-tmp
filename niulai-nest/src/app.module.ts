@@ -24,6 +24,8 @@ import { CodegenModule } from "./codegen/codegen.module";
 import { FileModule } from "./file/file.module";
 import { LogModule } from "./system/log/log.module";
 import { NoticeModule } from "./system/notice/notice.module";
+import { StorageModule } from "./storage/storage.module"; // 个人物品收纳模块
+import { SunoModule } from "./suno/suno.module"; // Suno 音乐模块
 
 import { LoggerMiddleware } from "./common/middleware/logger.middleware";
 import { RequestContextMiddleware } from "./common/middleware/request-context.middleware";
@@ -106,6 +108,8 @@ const envPath = `.env.${process.env.NODE_ENV || "dev"}`;
     CodegenModule,
     LogModule,
     NoticeModule,
+    StorageModule,
+    SunoModule,
   ],
   controllers: [],
   providers: [

@@ -1,0 +1,198 @@
+# ==============================================================================
+# 牛来后台管理系统 —— 生产环境一键部署（含应用容器）
+# ------------------------------------------------------------------------------
+# 启动：  cd niulai-nest
+#         docker compose -f docker-compose.prod.yml up -d --build
+# 状态：  docker compose -f docker-compose.prod.yml ps
+# 日志：  docker compose -f docker-compose.prod.yml logs -f app
+# 重启：  docker compose -f docker-compose.prod.yml restart app
+# 停止：  docker compose -f docker-compose.prod.yml down        # 保留数据卷
+#         docker compose -f docker-compose.prod.yml down -v     # 连数据一起删（慎用）
+#
+# 与 docker/docker-compose.yml 的区别：
+#   - 那个文件只有 MySQL / Redis / MinIO，用于**本地开发**时起依赖服务
+#   - 本文件额外包含 app（Nest 应用容器），用于**服务器一键部署**
+#
+# ==============================================================================
+# 【先判断你属于哪种情况】数据库是否已经存在？
+# ------------------------------------------------------------------------------
+#   情形 A｜全新部署，服务器上没有任何数据库
+#          → 就用本文件，会自动建库建表并导入初始数据
+#
+#   情形 B｜数据库已经存在，且库里有业务数据 / 表结构已就绪
+#          → 别用本文件（会另起一套空库），改用 docker-compose.app-only.yml
+#            只跑应用容器，连接你已有的 MySQL / Redis
+#
+#   情形 C｜数据库已存在，只是缺几张表（例如缺 storage_* / suno_* 模块）
+#          → 仍用 docker-compose.app-only.yml 起 app，再【手工】导入缺的那一个脚本；
+#            导入前先备份，并确认该脚本要建的 4 张表在库里确实不存在
+#
+#   情形 D｜想用本文件，但库表已经准备好了，只要别执行初始化 SQL
+#          → 把下面 mysql 服务里挂载 ./sql/mysql 的那一行注释掉
+#
+# ==============================================================================
+# ⚠️⚠️ 极度重要：sql/mysql/*.sql 是【破坏性】脚本 ⚠️⚠️
+#   三个文件共含 24 条 DROP TABLE IF EXISTS：
+#     niulai_admin.sql    → DROP 16 张 sys_* / gen_* 表
+#     storage_module.sql  → DROP  4 张 storage_* 表
+#     suno_module.sql     → DROP  4 张 suno_* 表
+#   也就是说，对已有数据的库执行这些脚本 = 这 24 张表的数据全部丢失且无法恢复。
+#
+#   好消息：官方 mysql 镜像的 entrypoint 只在【数据目录为空（首次启动）】时
+#   执行 /docker-entrypoint-initdb.d，正常重启不会重复触发，所以情形 A 是安全的。
+#   但请务必不要手工、重复地去导入这些脚本。
+#
+# 变量优先级（从高到低）：
+#   compose 的 environment  >  env_file: .env.prod  >  镜像内的 .env
+#   依据：dotenv 不会覆盖已存在的 process.env，所以这套覆盖是可靠的
+#
+# ⚠️ 密码类变量请保持两处一致：.env.prod 与下面 ${XXX:-默认值} 中的默认值
+# ==============================================================================
+
+name: niulai-nest
+
+networks:
+  niulai:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+
+services:
+  # ---------------------------- 应用（NestJS） ----------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: niulai-nest:latest
+    container_name: niulai-app
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env.prod
+    environment:
+      NODE_ENV: prod # 决定加载 .env.prod，务必保留
+      APP_PORT: 8000
+      # 容器内用服务名互通，覆盖 .env.prod 里的 127.0.0.1
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-yee.123456}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      OSS_MINIO_ENDPOINT: http://minio:9000
+    ports:
+      # 若服务器上已有 Nginx 反代，建议改为 "127.0.0.1:8000:8000" 只对本机开放
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      # 日志持久化（winston 写入 logs/，见 src/app.module.ts）
+      - ./logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+    networks:
+      - niulai
+
+  # ------------------------------- MySQL -------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: niulai-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-yee.123456}
+      MYSQL_DATABASE: ${MYSQL_DB:-niulai_admin}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 仅在数据卷为空（首次启动）时按文件名顺序自动导入：
+      #   niulai_admin.sql   → 建库 + 16 张系统表（内部自带 USE niulai_admin）
+      #   storage_module.sql → 4 张表
+      #   suno_module.sql    → 4 张表
+      # 后两个脚本没有 USE 语句，靠 mysql 官方 entrypoint 自动带上的
+      # --database=$MYSQL_DATABASE 落库，因此 MYSQL_DATABASE 必须为 niulai_admin
+      #
+      # ⚠️ 下面这行【只在数据卷为空时生效】，但脚本内含 24 条 DROP TABLE：
+      #    · 情形 D（库表已就绪、只是要跑应用）→ 注释掉这一行
+      #    · 情形 B（复用已有数据库）        → 改用 docker-compose.app-only.yml
+      #    · 想重新导入 → 只能 down -v 清空数据卷（会丢数据），且必须先把旧数据备份出来
+      #      备份： docker exec niulai-mysql sh -c \
+      #               'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction niulai_admin' \
+      #             > backup_$(date +%F_%H%M).sql
+      #
+      # 另注：entrypoint 判断「是否初始化过」只看数据目录里有没有 mysql 系统库，
+      #       不看目标库在不在。所以数据卷非空时，即使 MYSQL_DB 指向的库还没建，
+      #       初始化脚本也不会执行 —— 需要手工建库或改走 app-only。
+      - ./sql/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks:
+      - niulai
+    # 故意不映射端口：仅在容器网络内可达，避免 3306 暴露到公网。
+    # 需要本机用客户端连时，临时加："127.0.0.1:3306:3306"
+
+  # ------------------------------- Redis -------------------------------
+  redis:
+    image: redis:7.2.3
+    container_name: niulai-redis
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    # 有密码就开鉴权，为空则不设密码 —— 与 .env.prod 的 REDIS_PASSWORD 行为保持一致
+    command:
+      - sh
+      - -c
+      - >
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes;
+        else
+          exec redis-server --appendonly yes;
+        fi
+    volumes:
+      - redis_data:/data
+    networks:
+      - niulai
+    # 同上，不对宿主机暴露 6379
+
+  # ------------------- MinIO（.env.prod 中 OSS_TYPE=minio） -------------------
+  minio:
+    image: minio/minio:RELEASE.2024-07-16T23-46-41Z
+    container_name: niulai-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      TZ: Asia/Shanghai
+      MINIO_ROOT_USER: ${OSS_MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${OSS_MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    networks:
+      - niulai
+    # ⚠️ MinIO 不映射端口（仅内网使用）时，后端返回给前端的文件 URL 会是
+    #    http://minio:9000/...，浏览器解析不了。两种情况二选一：
+    #      ① 设置 .env.prod 的 OSS_MINIO_CUSTOM_DOMAIN 指向公网可访问的域名，
+    #         并在 Nginx / 1Panel 上为该域名配一条到本服务 9000 的反向代理；
+    #      ② 或直接把 9000 映射出来（$ {OSS_MINIO_CUSTOM_DOMAIN} 不用配）：
+    # ports:
+    #   - "9000:9000"
+    # 只在服务器本机调试控制台时，可临时放开：
+    # ports:
+    #   - "127.0.0.1:9001:9001"

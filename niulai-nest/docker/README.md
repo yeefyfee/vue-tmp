@@ -1,6 +1,28 @@
 # Docker 环境说明
 
-## 快速启动
+本目录下有**一个** compose 文件（本地开发用），项目的生产部署文件在**上一级目录**。
+**已经有数据库**的场景有专门的文件，别用错：
+
+| 文件 | 用途 | 包含内容 |
+|------|------|----------|
+| `docker/docker-compose.yml`（本文件） | **本地开发**时起依赖服务 | 仅 MySQL / Redis / MinIO，**不含应用** |
+| `../docker-compose.prod.yml` | **服务器生产部署**（从零开始，无任何数据库） | app（Nest 应用）+ MySQL + Redis + MinIO |
+| `../docker-compose.app-only.yml` | **服务器已有 MySQL / Redis / 云数据库**时 | 仅 app，复用外部数据库，**不建库、不导入 SQL** |
+
+怎么选：
+
+- **从零部署一台新服务器** → `docker-compose.prod.yml`
+- **数据库已经存在（有数据 / 别的项目在用 / 云 RDS）** → `docker-compose.app-only.yml`
+  （那三个初始化 SQL 含 24 条 `DROP TABLE`，对已有数据的库执行会清空 24 张表，务必先看注释）
+- **库里只缺几张表** → 仍用 `app-only` 起应用，再手工导入缺的那一个脚本，导入前先备份
+
+生产部署请看 [`../docker-compose.prod.yml`](../docker-compose.prod.yml) 与
+[`../docker-compose.app-only.yml`](../docker-compose.app-only.yml)，
+或根目录 [README.md](../../README.md) 的「七、生产部署 → 后端 → Docker 部署」。
+
+---
+
+## 快速启动（本地开发）
 
 在 docker 目录下执行：
 
