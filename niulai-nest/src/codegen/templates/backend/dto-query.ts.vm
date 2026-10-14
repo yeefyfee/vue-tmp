@@ -1,6 +1,6 @@
 import { IsOptional, IsString, IsNumber, IsArray } from "class-validator";
 import { Transform } from "class-transformer";
-import { BaseQueryDto } from "@/common/dto/base-query.dto";
+import { BaseQueryDto } from "../../../common/dto/base-query.dto";
 
 /**
  * ${businessName} 查询参数

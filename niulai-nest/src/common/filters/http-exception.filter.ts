@@ -34,12 +34,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
       return String(value);
     };
 
-    const buildResponseBody = (code: string, msg: string) => {
-      return {
-        code,
-        msg,
-        data: null,
-      };
+    const buildResponseBody = (code: string, msg: string, details?: unknown) => {
+      // 错误信封 `{ code, msg, details? }`（CROSS-13，决策 A4：字段名保留 msg）；
+      // details 仅在调用方显式携带时出现，历史响应体形状不变。
+      return details === undefined ? { code, msg, data: null } : { code, msg, details, data: null };
     };
 
     // 处理业务异常
@@ -49,7 +47,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
       const code = exceptionResponse["code"] || ErrorCode.SYSTEM_ERROR.code;
       const msg = exceptionResponse["msg"] || ErrorCode.SYSTEM_ERROR.msg;
-      return response.status(status).json(buildResponseBody(code, msg));
+      const details = exceptionResponse["details"];
+      return response.status(status).json(buildResponseBody(code, msg, details));
     }
 
     // 处理NestJS内置HTTP异常

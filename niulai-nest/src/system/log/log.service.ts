@@ -1,18 +1,32 @@
 ﻿import { Injectable } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
-import { SysLog } from "./entities/sys-log.entity";
+import { Prisma } from "@prisma/client";
+import { PrismaService } from "../../common/prisma/prisma.service";
+import { toBigInt } from "../../common/prisma/prisma-ids";
+import {
+  endOfDay,
+  enumerateDays,
+  formatDateTimeInZone,
+  getAppTimeZone,
+  startOfDay,
+  toDayString,
+} from "../../common/utils/date.util";
 import { LogQueryDto } from "./dto/log-query.dto";
 import { LogPageDto } from "./dto/log-page.dto";
 import { VisitTrendDto } from "./dto/visit-trend.dto";
 import { VisitStatsDto } from "./dto/visit-stats.dto";
 import { ActionTypeEnum, ActionTypeValue } from "../../common/enums/action-type.enum";
-import { LogModuleEnum } from "../../common/enums/log-module.enum";
+import { LogModuleEnum, LogModuleValue } from "../../common/enums/log-module.enum";
 import { parseUserAgent } from "../../common/utils/user-agent.util";
+import { LOG_COLUMN_LIMITS, clampLogText, resolveLogTitle } from "./log.util";
 
 export interface ManualLogParams {
+  /** 所属模块（原实现漏传，导致 module/title 为 NOT NULL 的插入依赖 MySQL 非严格模式，此处显式必填） */
+  module: LogModuleValue;
   actionType: ActionTypeValue;
-  operatorId: string;
+  /** 不传则按「模块label-操作label」自动生成 */
+  title?: string;
+  content?: string;
+  operatorId: string | null;
   operatorName?: string;
   requestMethod: string;
   requestUri: string;
@@ -24,78 +38,97 @@ export interface ManualLogParams {
 }
 
 /**
+ * `sortBy` 允许的字段：沿用历史入参的**下划线列名**，映射到 Prisma 字段名。
+ * 使用白名单而非直接透传，避免排序字段被拼进 SQL。
+ */
+const SORT_FIELD_MAP: Record<string, keyof Prisma.SysLogOrderByWithRelationInput> = {
+  create_time: "createTime",
+  execution_time: "executionTime",
+  action_type: "actionType",
+  request_uri: "requestUri",
+  request_method: "requestMethod",
+  ip: "ip",
+  status: "status",
+};
+
+/** 关键字检索覆盖的列（用户可见文本 + 请求信息 + 客户端信息） */
+const KEYWORD_FIELDS = [
+  "title",
+  "content",
+  "requestUri",
+  "requestMethod",
+  "province",
+  "city",
+  "browser",
+  "os",
+  "device",
+  "errorMsg",
+] as const;
+
+/**
  * 日志服务
  */
 @Injectable()
 export class LogService {
-  constructor(
-    @InjectRepository(SysLog)
-    private readonly logRepository: Repository<SysLog>
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async getLogPage(query: LogQueryDto) {
     const { pageNum, pageSize, keywords, createTime, sortBy, order } = query;
 
     const pageNumSafe = Number(pageNum) > 0 ? Number(pageNum) : 1;
-    const pageSizeSafe = Number(pageSize) > 0 ? Number(pageSize) : 10;
+    const pageSizeSafe = Number(pageSize) > 0 ? Number(pageSize) : 20;
 
-    const qb = this.logRepository.createQueryBuilder("log");
+    const where: Prisma.SysLogWhereInput = {};
+    const and: Prisma.SysLogWhereInput[] = [];
 
     if (keywords) {
-      qb.andWhere(
-        "(log.action_type LIKE :kw OR log.request_uri LIKE :kw OR log.request_method LIKE :kw OR log.province LIKE :kw OR log.city LIKE :kw OR log.browser LIKE :kw OR log.os LIKE :kw OR log.device LIKE :kw OR log.error_msg LIKE :kw)",
-        { kw: `%${keywords}%` }
-      );
+      // MySQL 默认排序规则不区分大小写，PostgreSQL 的 LIKE 区分；
+      // 用 insensitive 保持「搜 admin 能命中 Admin」的既有体验。
+      and.push({
+        OR: KEYWORD_FIELDS.map((field) => ({
+          [field]: { contains: keywords, mode: "insensitive" as const },
+        })),
+      });
     }
 
-    if (createTime && createTime.length >= 1) {
-      const startTime = createTime[0];
-      if (startTime) {
-        qb.andWhere("log.create_time >= :start", { start: startTime });
-      }
+    // 时间区间按**应用时区**的自然日解释，避免依赖进程时区
+    const timeZone = getAppTimeZone();
+    const startTime = createTime?.[0];
+    const endTime = createTime?.[1];
+    if (startTime) {
+      const from = startOfDay(startTime, timeZone);
+      if (from) and.push({ createTime: { gte: from } });
     }
-    if (createTime && createTime.length >= 2) {
-      const endTime = createTime[1];
-      if (endTime) {
-        // 结束日期拼接 23:59:59，包含当天所有数据
-        const endDateTime = endTime.length === 10 ? `${endTime} 23:59:59` : endTime;
-        qb.andWhere("log.create_time <= :end", { end: endDateTime });
-      }
+    if (endTime) {
+      const to = endOfDay(endTime, timeZone);
+      if (to) and.push({ createTime: { lte: to } });
     }
 
-    const allowedSortBy = new Set([
-      "create_time",
-      "execution_time",
-      "action_type",
-      "request_uri",
-      "request_method",
-      "ip",
-      "status",
+    if (and.length) where.AND = and;
+
+    const direction: Prisma.SortOrder = (order || "").toUpperCase() === "ASC" ? "asc" : "desc";
+    const sortField = sortBy ? SORT_FIELD_MAP[sortBy] : undefined;
+    const orderBy: Prisma.SysLogOrderByWithRelationInput = sortField
+      ? { [sortField]: direction }
+      : { createTime: "desc" };
+
+    const [records, total] = await Promise.all([
+      this.prisma.scoped.sysLog.findMany({
+        where,
+        orderBy,
+        skip: (pageNumSafe - 1) * pageSizeSafe,
+        take: pageSizeSafe,
+      }),
+      this.prisma.scoped.sysLog.count({ where }),
     ]);
 
-    const normalizeOrder = (v?: string) => {
-      const dir = (v || "").toUpperCase();
-      return dir === "ASC" || dir === "DESC" ? dir : "DESC";
-    };
-
-    if (sortBy && allowedSortBy.has(sortBy)) {
-      qb.orderBy(`log.${sortBy}`, normalizeOrder(order));
-    } else {
-      qb.orderBy("log.create_time", "DESC");
-    }
-
-    const [records, total] = await qb
-      .skip((pageNumSafe - 1) * pageSizeSafe)
-      .take(pageSizeSafe)
-      .getManyAndCount();
-
     const list: LogPageDto[] = records.map((item) => ({
-      id: item.id,
+      id: item.id.toString(),
       module: item.module !== null ? LogModuleEnum.getLabel(item.module) : null,
       actionType: item.actionType !== null ? ActionTypeEnum.getLabel(item.actionType) : null,
       title: item.title,
       content: item.content,
-      operatorId: item.operatorId,
+      operatorId: item.operatorId !== null ? item.operatorId.toString() : null,
       operatorName: item.operatorName,
       status: item.status,
       requestUri: item.requestUri,
@@ -107,13 +140,7 @@ export class LogService {
       os: item.os,
       executionTime: item.executionTime,
       errorMsg: item.errorMsg,
-      createTime: item.createTime
-        ? `${item.createTime.getFullYear()}-${String(item.createTime.getMonth() + 1).padStart(2, "0")}-${String(
-            item.createTime.getDate()
-          ).padStart(2, "0")} ${String(item.createTime.getHours()).padStart(2, "0")}:${String(
-            item.createTime.getMinutes()
-          ).padStart(2, "0")}:${String(item.createTime.getSeconds()).padStart(2, "0")}`
-        : null,
+      createTime: formatDateTimeInZone(item.createTime, timeZone),
     }));
 
     return {
@@ -127,99 +154,83 @@ export class LogService {
   }
 
   async getVisitTrend(startDate: string, endDate: string): Promise<VisitTrendDto> {
-    const start = new Date(startDate + " 00:00:00");
-    const end = new Date(endDate + " 23:59:59");
-
-    const dates: string[] = [];
-    const cursor = new Date(start.getTime());
-    while (cursor <= end) {
-      const y = cursor.getFullYear();
-      const m = String(cursor.getMonth() + 1).padStart(2, "0");
-      const d = String(cursor.getDate()).padStart(2, "0");
-      dates.push(`${y}-${m}-${d}`);
-      cursor.setDate(cursor.getDate() + 1);
+    const timeZone = getAppTimeZone();
+    const start = startOfDay(startDate, timeZone);
+    const end = endOfDay(endDate, timeZone);
+    if (!start || !end) {
+      return { dates: [], pvList: [], uvList: [] };
     }
 
+    const firstDay = toDayString(start, timeZone);
+    const lastDay = toDayString(end, timeZone);
+    if (!firstDay || !lastDay) {
+      return { dates: [], pvList: [], uvList: [] };
+    }
+    const dates = enumerateDays(firstDay, lastDay);
     if (!dates.length) {
       return { dates: [], pvList: [], uvList: [] };
     }
 
-    const startStr = `${dates[0]} 00:00:00`;
-    const endStr = `${dates[dates.length - 1]} 23:59:59`;
-
-    const pvRows = await this.logRepository
-      .createQueryBuilder("log")
-      .select("DATE_FORMAT(log.create_time, '%Y-%m-%d')", "date")
-      .addSelect("COUNT(*)", "count")
-      .where("log.create_time BETWEEN :start AND :end", { start: startStr, end: endStr })
-      .groupBy("DATE_FORMAT(log.create_time, '%Y-%m-%d')")
-      .getRawMany<{ date: string; count: string }>();
-
-    const uvRows = await this.logRepository
-      .createQueryBuilder("log")
-      .select("DATE_FORMAT(log.create_time, '%Y-%m-%d')", "date")
-      .addSelect("COUNT(DISTINCT log.ip)", "count")
-      .where("log.create_time BETWEEN :start AND :end", { start: startStr, end: endStr })
-      .groupBy("DATE_FORMAT(log.create_time, '%Y-%m-%d')")
-      .getRawMany<{ date: string; count: string }>();
+    // 按天分组必须显式指定时区：timestamptz 直接 to_char 会按 UTC 日界切分，
+    // 北京时间 07:00 的数据会被归到前一天（见 scripts/verify-datetime-semantics.mjs 契约 4）。
+    const [pvRows, uvRows] = await Promise.all([
+      this.prisma.$queryRaw<Array<{ day: string; count: number }>>`
+        SELECT to_char(create_time AT TIME ZONE (${timeZone}::text), 'YYYY-MM-DD') AS day,
+               COUNT(*)::int AS count
+        FROM sys_log
+        WHERE create_time >= ${start} AND create_time <= ${end}
+        GROUP BY 1
+      `,
+      this.prisma.$queryRaw<Array<{ day: string; count: number }>>`
+        SELECT to_char(create_time AT TIME ZONE (${timeZone}::text), 'YYYY-MM-DD') AS day,
+               COUNT(DISTINCT ip)::int AS count
+        FROM sys_log
+        WHERE create_time >= ${start} AND create_time <= ${end}
+        GROUP BY 1
+      `,
+    ]);
 
     const pvMap = new Map<string, number>();
-    pvRows.forEach((row) => pvMap.set(row.date, Number(row.count) || 0));
+    for (const row of pvRows) pvMap.set(row.day, Number(row.count) || 0);
 
     const uvMap = new Map<string, number>();
-    uvRows.forEach((row) => uvMap.set(row.date, Number(row.count) || 0));
-
-    const pvList = dates.map((d) => pvMap.get(d) ?? 0);
-    const uvList = dates.map((d) => uvMap.get(d) ?? 0);
+    for (const row of uvRows) uvMap.set(row.day, Number(row.count) || 0);
 
     return {
       dates,
-      pvList,
-      uvList,
+      pvList: dates.map((d) => pvMap.get(d) ?? 0),
+      uvList: dates.map((d) => uvMap.get(d) ?? 0),
     };
   }
 
   async getVisitStats(): Promise<VisitStatsDto> {
-    const today = new Date();
-    const y = today.getFullYear();
-    const m = String(today.getMonth() + 1).padStart(2, "0");
-    const d = String(today.getDate()).padStart(2, "0");
-    const todayStr = `${y}-${m}-${d}`;
+    const timeZone = getAppTimeZone();
+    const now = new Date();
+    const todayStart = startOfDay(now, timeZone);
+    const todayEnd = endOfDay(now, timeZone);
 
-    const todayStart = `${todayStr} 00:00:00`;
-    const todayEnd = `${todayStr} 23:59:59`;
+    // UV 统计：按 IP 粗略统计（COUNT(DISTINCT) 会忽略 NULL，与旧实现一致）
+    const uvSql = (withToday: boolean) =>
+      withToday
+        ? this.prisma.$queryRaw<Array<{ count: number }>>`
+            SELECT COUNT(DISTINCT ip)::int AS count FROM sys_log
+            WHERE create_time >= ${todayStart} AND create_time <= ${todayEnd}
+          `
+        : this.prisma.$queryRaw<Array<{ count: number }>>`
+            SELECT COUNT(DISTINCT ip)::int AS count FROM sys_log
+          `;
 
-    // UV 统计：按 IP 粗略统计
-    const [todayUvRow, totalUvRow] = await Promise.all([
-      this.logRepository
-        .createQueryBuilder("log")
-        .select("COUNT(DISTINCT log.ip)", "count")
-        .where("log.create_time BETWEEN :start AND :end", { start: todayStart, end: todayEnd })
-        .getRawOne<{ count: string }>(),
-      this.logRepository
-        .createQueryBuilder("log")
-        .select("COUNT(DISTINCT log.ip)", "count")
-        .getRawOne<{ count: string }>(),
+    const [todayUvRows, totalUvRows, todayPvCount, totalPvCount] = await Promise.all([
+      uvSql(true),
+      uvSql(false),
+      this.prisma.sysLog.count({
+        where: { createTime: { gte: todayStart ?? undefined, lte: todayEnd ?? undefined } },
+      }),
+      this.prisma.sysLog.count(),
     ]);
 
-    const todayUvCount = Number(todayUvRow?.count ?? 0);
-    const totalUvCount = Number(totalUvRow?.count ?? 0);
-
-    // PV 统计
-    const [todayPvRow, totalPvRow] = await Promise.all([
-      this.logRepository
-        .createQueryBuilder("log")
-        .select("COUNT(*)", "count")
-        .where("log.create_time BETWEEN :start AND :end", { start: todayStart, end: todayEnd })
-        .getRawOne<{ count: string }>(),
-      this.logRepository
-        .createQueryBuilder("log")
-        .select("COUNT(*)", "count")
-        .getRawOne<{ count: string }>(),
-    ]);
-
-    const todayPvCount = Number(todayPvRow?.count ?? 0);
-    const totalPvCount = Number(totalPvRow?.count ?? 0);
+    const todayUvCount = Number(todayUvRows[0]?.count ?? 0);
+    const totalUvCount = Number(totalUvRows[0]?.count ?? 0);
 
     const prevUvTotal = totalUvCount - todayUvCount;
     const prevPvTotal = totalPvCount - todayPvCount;
@@ -244,24 +255,32 @@ export class LogService {
    * 拦截器无法从安全上下文获取 userId，需在业务逻辑中手动传入
    */
   async saveManualLog(params: ManualLogParams) {
-    const { userAgent = "" } = params;
-    const { browser, os } = parseUserAgent(userAgent);
+    const { browser, os } = parseUserAgent(params.userAgent ?? "");
 
-    const log = new SysLog();
-    log.actionType = params.actionType;
-    log.requestMethod = params.requestMethod;
-    log.requestUri = params.requestUri;
-    log.ip = params.ip ?? null;
-    log.device = os;
-    log.os = os;
-    log.browser = browser;
-    log.status = params.status ?? 1;
-    log.errorMsg = params.errorMsg ?? null;
-    log.executionTime = params.executionTime ?? 0;
-    log.operatorId = params.operatorId;
-    log.operatorName = params.operatorName ?? null;
-    log.createTime = new Date();
-
-    await this.logRepository.save(log);
+    await this.prisma.sysLog.create({
+      data: {
+        module: params.module,
+        actionType: params.actionType,
+        title: clampLogText(
+          resolveLogTitle(params.module, params.actionType, params.title),
+          LOG_COLUMN_LIMITS.title
+        ) as string,
+        content: params.content ?? null,
+        requestMethod: clampLogText(params.requestMethod, LOG_COLUMN_LIMITS.requestMethod),
+        requestUri: clampLogText(params.requestUri, LOG_COLUMN_LIMITS.requestUri),
+        ip: clampLogText(params.ip, LOG_COLUMN_LIMITS.ip),
+        province: null,
+        city: null,
+        device: clampLogText(os, LOG_COLUMN_LIMITS.device),
+        os: clampLogText(os, LOG_COLUMN_LIMITS.os),
+        browser: clampLogText(browser, LOG_COLUMN_LIMITS.browser),
+        status: params.status ?? 1,
+        errorMsg: clampLogText(params.errorMsg, LOG_COLUMN_LIMITS.errorMsg),
+        executionTime: params.executionTime ?? 0,
+        operatorId: toBigInt(params.operatorId),
+        operatorName: clampLogText(params.operatorName, LOG_COLUMN_LIMITS.operatorName),
+        createTime: new Date(),
+      },
+    });
   }
 }

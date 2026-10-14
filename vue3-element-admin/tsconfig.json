@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "lib": ["esnext", "dom"],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@peluvida/shared": ["../packages/shared/src/index.ts"]
     },
 
     // 严格性和类型检查相关配置

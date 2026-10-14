@@ -1,5 +1,3 @@
-import { IsOptional, IsEnum, IsDateString, IsInt, Min } from "class-validator";
-
 export enum ActionTypeEnum {
   LOGIN = "LOGIN",
   LOGOUT = "LOGOUT",

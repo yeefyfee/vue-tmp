@@ -1,59 +1,71 @@
 import request from "@/utils/request";
 import type { CaptchaInfo, LoginRequest, LoginResult } from "./types";
 
-/** 申请扫码票据的响应：票据字符串与有效期（秒） */
-export interface QrCodeGenerateResult {
-  /** 一次扫码登录会话的唯一票据，由 PC 端编码进二维码 */
-  ticket: string;
-  /** 票据有效期（秒），默认 300，过期后 Redis 自动清理 */
-  expireSeconds: number;
+/** 切换门店上下文的响应：新 access token 与当前激活门店 */
+export interface SwitchContextResult {
+  /** 内嵌 activeStoreId 的新访问令牌 */
+  accessToken: string;
+  /** 当前激活门店 */
+  activeStore: {
+    id: string;
+    name: string;
+  };
 }
 
-/** 轮询扫码状态的响应 */
-export interface QrCodeStatusResult {
-  /** 当前票据 */
-  ticket: string;
-  /** 状态：WAITING/SCANNED/CONFIRMED/LOGGED_IN/CANCELED/EXPIRED */
-  status: "WAITING" | "SCANNED" | "CONFIRMED" | "LOGGED_IN" | "CANCELED" | "EXPIRED";
-  /** 脱敏昵称，仅 SCANNED 之后返回，WAITING 为 undefined */
-  nickname?: string;
-  /** 头像 URL，仅 SCANNED 之后返回 */
-  avatar?: string;
-  /** 票据剩余有效期（秒） */
-  expireSeconds: number;
+/** 当前租户可切换门店项（对齐后端 AuthContextService.listSwitchableStores） */
+export interface OrganizationItem {
+  /** 门店 ID */
+  id: string;
+  /** 门店名称 */
+  name: string;
+  /** 门店编码 */
+  code: string;
+  /** 状态（1=启用） */
+  status: number;
 }
 
 const AUTH_BASE_URL = "/api/v1/auth";
 
 const AuthAPI = {
+  /**
+   * 账号密码登录
+   *
+   * 后端 DTO 仅接受 username / password / captchaId / captchaCode 四个必填字段。
+   */
   login(data: LoginRequest) {
-    const payload: Pick<
-      LoginRequest,
-      "username" | "password" | "captchaId" | "captchaCode" | "tenantId"
-    > = {
-      username: data.username,
-      password: data.password,
-      captchaId: data.captchaId,
-      captchaCode: data.captchaCode,
-    };
-
-    // 仅多租户场景传入 tenantId
-    if (typeof data.tenantId !== "undefined") {
-      payload.tenantId = data.tenantId;
-    }
-
     return request<unknown, LoginResult>({
       url: `${AUTH_BASE_URL}/login`,
       method: "post",
-      data: payload,
+      data: {
+        username: data.username,
+        password: data.password,
+        captchaId: data.captchaId,
+        captchaCode: data.captchaCode,
+      },
     });
   },
 
-  switchTenant(tenantId: number) {
-    return request<unknown, LoginResult>({
-      url: `${AUTH_BASE_URL}/switch-tenant`,
+  /**
+   * 切换门店上下文（P0-02-06）
+   *
+   * 校验目标门店后签发内嵌 activeStoreId 的新 access token；
+   * refresh token 沿用原值，tokenVersion 语义不变。
+   */
+  switchContext(storeId: string) {
+    return request<unknown, SwitchContextResult>({
+      url: `${AUTH_BASE_URL}/switch-context`,
       method: "post",
-      params: { tenantId },
+      data: { storeId },
+    });
+  },
+
+  /**
+   * 当前租户可切换门店列表（启用状态，供切店 UI 数据源）
+   */
+  getOrganizations() {
+    return request<unknown, OrganizationItem[]>({
+      url: `${AUTH_BASE_URL}/organizations`,
+      method: "get",
     });
   },
 
@@ -79,31 +91,6 @@ const AuthAPI = {
     return request<unknown, CaptchaInfo>({
       url: `${AUTH_BASE_URL}/captcha`,
       method: "get",
-    });
-  },
-
-  // ============ 扫码登录 ============
-
-  qrGenerate(): Promise<QrCodeGenerateResult> {
-    return request<unknown, QrCodeGenerateResult>({
-      url: `${AUTH_BASE_URL}/qr-code/generate`,
-      method: "post",
-    });
-  },
-
-  qrStatus(ticket: string): Promise<QrCodeStatusResult> {
-    return request<unknown, QrCodeStatusResult>({
-      url: `${AUTH_BASE_URL}/qr-code/status`,
-      method: "get",
-      params: { ticket },
-    });
-  },
-
-  qrLogin(ticket: string): Promise<LoginResult> {
-    return request<unknown, LoginResult>({
-      url: `${AUTH_BASE_URL}/qr-code/login`,
-      method: "post",
-      data: { ticket },
     });
   },
 };

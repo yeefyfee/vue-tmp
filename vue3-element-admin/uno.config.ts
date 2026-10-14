@@ -10,6 +10,8 @@ import {
 
 import { FileSystemIconLoader } from "@iconify/utils/lib/loader/node-loaders";
 import fs from "fs";
+// PeluVida 设计令牌（CROSS-16）：语义色 / 字号唯一来源，构建期内联进 Uno theme
+import { SEMANTIC_COLORS, FONT_SIZE_WEB } from "@peluvida/shared";
 
 // 本地SVG图标目录
 const iconsDir = "./src/assets/icons";
@@ -42,6 +44,19 @@ export default defineConfig({
     colors: {
       primary: "var(--el-color-primary)",
       primary_dark: "var(--el-color-primary-light-5)",
+      // PeluVida 语义色（CROSS-16，来源 @peluvida/shared SEMANTIC_COLORS）
+      info: SEMANTIC_COLORS.info,
+      success: SEMANTIC_COLORS.success,
+      warning: SEMANTIC_COLORS.warning,
+      danger: SEMANTIC_COLORS.danger,
+      neutral: SEMANTIC_COLORS.neutral,
+    },
+    fontSize: {
+      // PeluVida 字号 token（Web：20/16/14/12px）
+      "page-title": `${FONT_SIZE_WEB.pageTitle}px`,
+      "section-title": `${FONT_SIZE_WEB.sectionTitle}px`,
+      body: `${FONT_SIZE_WEB.body}px`,
+      helper: `${FONT_SIZE_WEB.helper}px`,
     },
     breakpoints: Object.fromEntries(
       [640, 768, 1024, 1280, 1536, 1920, 2560].map((size, index) => [

@@ -2,19 +2,16 @@
 import { Reflector } from "@nestjs/core";
 import { Observable, throwError } from "rxjs";
 import { catchError, tap } from "rxjs/operators";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
-import { SysLog } from "./entities/sys-log.entity";
+import { PrismaService } from "../../common/prisma/prisma.service";
+import { toBigInt } from "../../common/prisma/prisma-ids";
 import { LOG_MODULE, LogMetadata } from "../../common/decorators/log.decorator";
-import { ActionTypeEnum } from "../../common/enums/action-type.enum";
-import { LogModuleEnum } from "../../common/enums/log-module.enum";
 import { parseUserAgent } from "../../common/utils/user-agent.util";
+import { LOG_COLUMN_LIMITS, clampLogText, resolveLogTitle } from "./log.util";
 
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
   constructor(
-    @InjectRepository(SysLog)
-    private readonly logRepository: Repository<SysLog>,
+    private readonly prisma: PrismaService,
     private readonly reflector: Reflector
   ) {}
 
@@ -50,34 +47,39 @@ export class LoggingInterceptor implements NestInterceptor {
 
       const { module, actionType, title, content } = logMetadata;
 
-      const log = new SysLog();
-      log.module = module;
-      log.actionType = actionType;
-      log.title =
-        title || `${LogModuleEnum.getLabel(module)}-${ActionTypeEnum.getLabel(actionType)}`;
-      log.content = content || null;
-      log.requestMethod = req.method;
-      const url: string = req.originalUrl || req.url;
-      log.requestUri = url;
       const xff = (req.headers?.["x-forwarded-for"] as string) || "";
       const realIp = xff.split(",")[0].trim();
-      log.ip = realIp || req.ip || req.connection?.remoteAddress || null;
-      log.province = null;
-      log.city = null;
-      log.device = os;
-      log.os = os;
-      log.browser = browser;
-      log.status = error ? 0 : 1;
-      log.errorMsg = error?.message || null;
-      log.executionTime = duration;
-      log.operatorId = req.user?.userId ?? null;
-      log.operatorName = req.user?.username ?? null;
-      log.createTime = new Date();
 
-      await this.logRepository.save(log);
+      await this.prisma.sysLog.create({
+        data: {
+          module,
+          actionType,
+          title: clampLogText(
+            resolveLogTitle(module, actionType, title),
+            LOG_COLUMN_LIMITS.title
+          ) as string,
+          content: content || null,
+          requestMethod: clampLogText(req.method, LOG_COLUMN_LIMITS.requestMethod),
+          requestUri: clampLogText(req.originalUrl || req.url, LOG_COLUMN_LIMITS.requestUri),
+          ip: clampLogText(
+            realIp || req.ip || req.connection?.remoteAddress || null,
+            LOG_COLUMN_LIMITS.ip
+          ),
+          province: null,
+          city: null,
+          device: clampLogText(os, LOG_COLUMN_LIMITS.device),
+          os: clampLogText(os, LOG_COLUMN_LIMITS.os),
+          browser: clampLogText(browser, LOG_COLUMN_LIMITS.browser),
+          status: error ? 0 : 1,
+          errorMsg: clampLogText(error?.message, LOG_COLUMN_LIMITS.errorMsg),
+          executionTime: duration,
+          operatorId: toBigInt(req.user?.userId),
+          operatorName: clampLogText(req.user?.username, LOG_COLUMN_LIMITS.operatorName),
+          createTime: new Date(),
+        },
+      });
     } catch {
       // 日志保存失败不影响主流程
     }
   }
-
 }

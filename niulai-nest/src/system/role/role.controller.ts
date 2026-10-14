@@ -11,7 +11,9 @@ import {
   SetMetadata,
 } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
+import { AuditEntityType, AuditAction } from "@peluvida/shared";
 import { Permissions } from "../../common/decorators/auth.decorator";
+import { Audit } from "../../common/audit/audit.decorator";
 import { Log } from "../../common/decorators/log.decorator";
 import { ActionTypeValue } from "../../common/enums/action-type.enum";
 import { LogModuleValue } from "../../common/enums/log-module.enum";
@@ -41,6 +43,7 @@ export class RoleController {
   @ApiOperation({ summary: "新增角色" })
   @Post()
   @Permissions("sys:role:create")
+  @Audit({ entityType: AuditEntityType.ROLE, action: AuditAction.CREATE })
   async create(@Req() request, @Body() createRoleDto: CreateRoleDto) {
     await this.rolesService.saveRole({ ...createRoleDto });
     return { success: true };
@@ -56,6 +59,7 @@ export class RoleController {
   @ApiOperation({ summary: "修改角色" })
   @Put(":id")
   @Permissions("sys:role:update")
+  @Audit({ entityType: AuditEntityType.ROLE, action: AuditAction.UPDATE })
   async updateRole(@Param("id") id: string, @Body() updateRoleDto: UpdateRoleDto) {
     await this.rolesService.saveRole({ ...updateRoleDto, id });
     return { success: true };
@@ -64,6 +68,9 @@ export class RoleController {
   @ApiOperation({ summary: "修改角色状态" })
   @Put(":roleId/status")
   @Permissions("sys:role:update")
+  // 启用/停用由 query.status 决定，静态元数据无法区分，统一记 UPDATE
+  // （口径与用户状态开关一致；enable/disable 动作值留给后续动态打点需求）
+  @Audit({ entityType: AuditEntityType.ROLE, action: AuditAction.UPDATE })
   async updateRoleStatus(@Param("roleId") roleId: string, @Query("status") status: number) {
     const success = await this.rolesService.updateRoleStatus(roleId, status);
     return { success };
@@ -73,6 +80,7 @@ export class RoleController {
   @Log(LogModuleValue.ROLE, ActionTypeValue.DELETE)
   @Delete(":ids")
   @Permissions("sys:role:delete")
+  @Audit({ entityType: AuditEntityType.ROLE, action: AuditAction.DELETE })
   async deleteRoles(@Param("ids") ids: string) {
     await this.rolesService.deleteRoles(ids);
     return { success: true };
@@ -89,6 +97,7 @@ export class RoleController {
   @Log(LogModuleValue.ROLE, ActionTypeValue.GRANT)
   @Put(":id/menus")
   @Permissions("sys:role:assign")
+  @Audit({ entityType: AuditEntityType.ROLE, action: AuditAction.GRANT })
   async updateMenus(@Param("id") id: string, @Body() menuIds: (string | number)[]): Promise<any> {
     const ids = (menuIds || []).map((v) => v.toString());
     return await this.rolesService.updateMenus(id, ids);

@@ -4,17 +4,32 @@ export const DATA_PERMISSION_KEY = "data_permission";
 
 /** 数据权限装饰器配置 */
 export interface DataPermissionConfig {
-  /** 部门表别名 */
+  // ─────────── Prisma 形态（PEL-10c 起，新代码用这组） ───────────
+  /** 施加数据权限的 Prisma 模型名（如 "SysUser"）。不声明则本请求不注入 */
+  model?: string;
+  /** 部门维度字段（Prisma 字段名，如 "deptId"） */
+  deptField?: string;
+  /** 归属人维度字段（Prisma 字段名，如 "createBy"） */
+  ownerField?: string;
+
+  // ─────────── TypeORM 遗留形态（迁移完成后删除） ───────────
+  /** @deprecated 仅 TypeORM QueryBuilder 插件使用 */
   deptAlias?: string;
-  /** 部门ID字段名 */
+  /** @deprecated 仅 TypeORM QueryBuilder 插件使用 */
   deptIdColumnName?: string;
-  /** 用户表别名 */
+  /** @deprecated 仅 TypeORM QueryBuilder 插件使用 */
   userAlias?: string;
-  /** 用户ID字段名 */
+  /** @deprecated 仅 TypeORM QueryBuilder 插件使用 */
   userIdColumnName?: string;
 }
 
-/** 数据权限装饰器 */
+/**
+ * 数据权限装饰器
+ *
+ * 迁移期两套并存：Prisma 扩展读 `model/deptField/ownerField`，
+ * TypeORM 插件读 `deptAlias/*ColumnName`。给同一个 handler 同时写两组即可，
+ * TypeORM 摘除后把遗留字段一并删掉。
+ */
 export function DataPermission(config?: DataPermissionConfig): MethodDecorator & ClassDecorator {
   return (
     target: any,
@@ -22,6 +37,9 @@ export function DataPermission(config?: DataPermissionConfig): MethodDecorator &
     descriptor?: TypedPropertyDescriptor<any>
   ) => {
     const finalConfig: DataPermissionConfig = {
+      model: config?.model,
+      deptField: config?.deptField,
+      ownerField: config?.ownerField,
       deptAlias: config?.deptAlias,
       deptIdColumnName: config?.deptIdColumnName ?? "dept_id",
       userAlias: config?.userAlias,

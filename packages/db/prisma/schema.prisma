@@ -1,0 +1,1452 @@
+// PeluVida OS · Prisma schema 基线（PEL-10 建模，CROSS-08 归位于 packages/db）
+//
+// 设计约定（与 A1 / Q6 决策一致）：
+//   1. 表名 / 列名一律保持**原下划线命名**，通过 @@map / @map 显式映射，保证 1:1 可对照。
+//   2. 本基线**只做字段级 1:1 平移，不引入关系与外键** —— 原 MySQL 库同样没有外键（仅索引），
+//      保持一致可避免插入顺序 / 级联删除带来的行为变化。全量域建模（关系、分区、RLS）见 CROSS-08。
+//   3. 金额统一「分」整数 → 用 BigInt（本基线无金额列，后续业务域落地时执行）。
+//   4. 逻辑删除统一 is_deleted（0 未删 / 1 已删），不做 Prisma 软删扩展（由业务层显式过滤）。
+//   5. 主键统一 BigInt 自增（对应 MySQL BIGINT AUTO_INCREMENT）。
+//
+// 本文件覆盖 20 张模型：sys_* 12 + gen_* 2 + tenant 1 + 业务域 4（store/service_category/room/staff，P0）
+// + 审计日志 1（audit_log，P0-02-08，按月分区 append-only）。
+// 已随业务剥离一并移除的表：sys_notice / sys_user_notice（通知模块已归档）。
+// 另：sys_user_social 在旧库中缺失 create_by/update_by/is_deleted（旧实体却继承了 BaseEntity，
+//     属运行期必炸的历史缺陷），本基线按实体口径补齐。
+//
+// ─────────────────────────────────────────────────────────────
+// 冻结口径的唯一例外（2026-10-05 用户拍板）
+// ─────────────────────────────────────────────────────────────
+// sys_user 追加 `tenant_id` 列（P0-03-01）：账号-租户归属必须在账号本体上，
+// 拒绝关联表方案的 N+1 与一致性负担。这是系统域 14 表唯一一次结构变更，
+// 其余冻结口径（id BigInt 自增 / create_time / is_deleted 等）不变。
+//
+// ─────────────────────────────────────────────────────────────
+// 业务域新表公共字段口径（CROSS-08 强制，此后新增模型一律套用）
+// ─────────────────────────────────────────────────────────────
+// 上方 sys_* / gen_* 系统管理域 14 表是 PEL-10 移植基线，公共字段沿用旧口径
+// （id BigInt 自增 / create_time / update_time / is_deleted），**已冻结不再改**。
+// 此后新增的业务域模型（门店 / 宠物 / 预约 / 商品 / 订单…）一律套用以下口径：
+//
+//   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+//                         -- uuid 主键；库层生成（PG16 内置 gen_random_uuid），外部 SQL 插入也安全
+//   tenant_id   BigInt    -- 租户 id（RLS 强制过滤，策略见 CROSS-09；GUC app.tenant_id）
+//   store_id    BigInt?   -- 门店 id（平台级数据可空；多店聚合语义见 CROSS-21）
+//   created_at  DateTime  @default(now()) @db.Timestamptz(3)
+//   updated_at  DateTime  @default(now()) @updatedAt @db.Timestamptz(3)
+//   created_by  BigInt?   -- 操作人（业务层从请求上下文注入，不设库层默认）
+//   updated_by  BigInt?
+//   deleted_at  DateTime? -- 逻辑删除（NULL=未删；替代旧 is_deleted，由业务层显式过滤）
+//   version     Int       @default(0) -- 乐观锁
+//
+//   * 金额列一律 BigInt「分」（@db.BigInt），禁用 Float / Decimal（A1 / Q6）。
+//   * 列名 DB 侧一律 snake_case，经 @map / @@map 映射（Prisma 侧 camelCase）。
+//   * 禁用物理级联删除与数据库外键（与基线一致，跨表一致性由业务层保证）。
+//
+// 首批落地记录（2026-10-05，业务域四表 P0）：Store / ServiceCategory / Room / Staff。
+// 权威口径见设计草案 v2（.workbuddy/tmp/biz-domain-models-draft.md），在上述公共口径上细化：
+//   业务表间关联（store_id/parent_id）一律 String @db.Uuid；引用系统域 sys_user 的列
+//   （sys_user_id/created_by/updated_by）保持 BigInt?；时间列逐列显式 @db.Timestamptz(3)。
+// 审计日志（2026-10-05，P0-02-08）：AuditLog —— uuid 主键 + @@id([id, createdAt]) 分区复合主键
+//   （PG 分区表主键必须含分区键）；按月 RANGE 分区 / RLS / 不可改删触发器全在
+//   手写迁移 20261005170000_audit_log_partitioned（Prisma 不表达分区，model 即普通模型）。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Prisma 7 起连接串不再写在 schema 内，统一由 prisma.config.ts 提供（见项目根同名文件）
+}
+
+// ─────────────────────────────────────────────
+// 部门
+// ─────────────────────────────────────────────
+model SysDept {
+  id         BigInt    @id @default(autoincrement())
+  name       String    @db.VarChar(100)
+  code       String    @unique @db.VarChar(100)
+  parentId   BigInt?   @default(0) @map("parent_id")
+  treePath   String    @map("tree_path") @db.VarChar(255)
+  sort       Int       @default(0) @db.SmallInt
+  status     Int       @default(1) @db.SmallInt
+  createBy   BigInt?   @map("create_by")
+  createTime DateTime? @map("create_time") @db.Timestamptz(3)
+  updateBy   BigInt?   @map("update_by")
+  updateTime DateTime? @map("update_time") @db.Timestamptz(3)
+  isDeleted  Int       @default(0) @map("is_deleted") @db.SmallInt
+
+  @@map("sys_dept")
+}
+
+// ─────────────────────────────────────────────
+// 用户
+// ─────────────────────────────────────────────
+model SysUser {
+  id         BigInt    @id @default(autoincrement())
+  username   String    @db.VarChar(64)
+  nickname   String    @db.VarChar(64)
+  gender     Int       @default(1) @db.SmallInt
+  password   String    @db.VarChar(100)
+  deptId     BigInt?   @map("dept_id")
+  /// 所属租户（P0-03-01，冻结口径唯一例外，见文件头）；NULL = 平台级账号（不受租户 RLS）
+  tenantId   BigInt?   @map("tenant_id")
+  avatar     String?   @db.VarChar(255)
+  mobile     String?   @db.VarChar(20)
+  status     Int       @default(1) @db.SmallInt
+  email      String?   @db.VarChar(128)
+  createBy   BigInt?   @map("create_by")
+  createTime DateTime? @map("create_time") @db.Timestamptz(3)
+  updateBy   BigInt?   @map("update_by")
+  updateTime DateTime? @map("update_time") @db.Timestamptz(3)
+  isDeleted  Int       @default(0) @map("is_deleted") @db.SmallInt
+
+  @@map("sys_user")
+}
+
+model SysUserRole {
+  userId BigInt @map("user_id")
+  roleId BigInt @map("role_id")
+
+  @@id([userId, roleId])
+  @@map("sys_user_role")
+}
+
+model SysUserSocial {
+  id         BigInt    @id @default(autoincrement())
+  userId     BigInt    @map("user_id")
+  platform   String    @db.VarChar(20)
+  openid     String    @db.VarChar(64)
+  unionid    String?   @db.VarChar(64)
+  nickname   String?   @db.VarChar(64)
+  avatar     String?   @db.VarChar(255)
+  sessionKey String?   @map("session_key") @db.VarChar(128)
+  verified   Int       @default(1) @db.SmallInt
+  // 旧库缺以下三列（实体却继承 BaseEntity），此处按实体口径补齐
+  createBy   BigInt?   @map("create_by")
+  createTime DateTime? @map("create_time") @db.Timestamptz(3)
+  updateBy   BigInt?   @map("update_by")
+  updateTime DateTime? @map("update_time") @db.Timestamptz(3)
+  isDeleted  Int       @default(0) @map("is_deleted") @db.SmallInt
+
+  @@unique([platform, openid], map: "uk_platform_openid")
+  @@index([userId], map: "idx_user_id")
+  @@index([unionid], map: "idx_unionid")
+  @@map("sys_user_social")
+}
+
+// ─────────────────────────────────────────────
+// 角色
+// ─────────────────────────────────────────────
+model SysRole {
+  id         BigInt    @id @default(autoincrement())
+  name       String    @unique @db.VarChar(64)
+  code       String    @unique @db.VarChar(32)
+  sort       Int?
+  status     Int       @default(1) @db.SmallInt
+  dataScope  Int?      @map("data_scope") @db.SmallInt
+  createBy   BigInt?   @map("create_by")
+  createTime DateTime? @map("create_time") @db.Timestamptz(3)
+  updateBy   BigInt?   @map("update_by")
+  updateTime DateTime? @map("update_time") @db.Timestamptz(3)
+  isDeleted  Int       @default(0) @map("is_deleted") @db.SmallInt
+
+  @@map("sys_role")
+}
+
+model SysRoleMenu {
+  roleId BigInt @map("role_id")
+  menuId BigInt @map("menu_id")
+
+  @@id([roleId, menuId])
+  @@map("sys_role_menu")
+}
+
+model SysRoleDept {
+  roleId BigInt @map("role_id")
+  deptId BigInt @map("dept_id")
+
+  @@id([roleId, deptId])
+  @@map("sys_role_dept")
+}
+
+// ─────────────────────────────────────────────
+// 菜单
+// ─────────────────────────────────────────────
+model SysMenu {
+  id         BigInt    @id @default(autoincrement())
+  parentId   BigInt    @map("parent_id")
+  treePath   String?   @map("tree_path") @db.VarChar(255)
+  name       String    @db.VarChar(64)
+  menuType   String    @map("type") @db.Char(1)
+  routeName  String?   @map("route_name") @db.VarChar(255)
+  routePath  String?   @map("route_path") @db.VarChar(128)
+  component  String?   @db.VarChar(128)
+  perm       String?   @db.VarChar(128)
+  alwaysShow Int?      @default(0) @map("always_show") @db.SmallInt
+  keepAlive  Int?      @default(0) @map("keep_alive") @db.SmallInt
+  visible    Int       @default(1) @db.SmallInt
+  sort       Int       @default(0)
+  icon       String?   @db.VarChar(64)
+  redirect   String?   @db.VarChar(128)
+  params     Json?
+  createTime DateTime? @map("create_time") @db.Timestamptz(3)
+  updateTime DateTime? @map("update_time") @db.Timestamptz(3)
+
+  @@map("sys_menu")
+}
+
+// ─────────────────────────────────────────────
+// 字典
+// ─────────────────────────────────────────────
+model SysDict {
+  id         BigInt    @id @default(autoincrement())
+  dictCode   String?   @map("dict_code") @db.VarChar(50)
+  name       String?   @db.VarChar(50)
+  status     Int       @default(0) @db.SmallInt
+  remark     String?   @db.VarChar(255)
+  createBy   BigInt?   @map("create_by")
+  createTime DateTime? @map("create_time") @db.Timestamptz(3)
+  updateBy   BigInt?   @map("update_by")
+  updateTime DateTime? @map("update_time") @db.Timestamptz(3)
+  isDeleted  Int       @default(0) @map("is_deleted") @db.SmallInt
+
+  @@index([dictCode], map: "idx_dict_code")
+  @@map("sys_dict")
+}
+
+model SysDictItem {
+  id         BigInt    @id @default(autoincrement())
+  dictCode   String    @map("dict_code") @db.VarChar(64)
+  label      String    @db.VarChar(100)
+  value      String    @db.VarChar(50)
+  sort       Int       @default(0)
+  status     Int       @default(1) @db.SmallInt
+  tagType    String?   @map("tag_type") @db.VarChar(50)
+  remark     String?   @db.VarChar(255)
+  createBy   BigInt?   @map("create_by")
+  createTime DateTime? @map("create_time") @db.Timestamptz(3)
+  updateBy   BigInt?   @map("update_by")
+  updateTime DateTime? @map("update_time") @db.Timestamptz(3)
+
+  @@map("sys_dict_item")
+}
+
+// ─────────────────────────────────────────────
+// 系统配置
+// ─────────────────────────────────────────────
+model SysConfig {
+  id          BigInt    @id @default(autoincrement())
+  configName  String    @map("config_name") @db.VarChar(50)
+  configKey   String    @map("config_key") @db.VarChar(50)
+  configValue String    @map("config_value") @db.VarChar(500)
+  remark      String?   @db.VarChar(500)
+  createBy    BigInt?   @map("create_by")
+  createTime  DateTime? @map("create_time") @db.Timestamptz(3)
+  updateBy    BigInt?   @map("update_by")
+  updateTime  DateTime? @map("update_time") @db.Timestamptz(3)
+  isDeleted   Int       @default(0) @map("is_deleted") @db.SmallInt
+
+  @@map("sys_config")
+}
+
+// ─────────────────────────────────────────────
+// 操作日志（无 update 字段，仅追加）
+// ─────────────────────────────────────────────
+model SysLog {
+  id            BigInt    @id @default(autoincrement())
+  module        Int       @db.SmallInt
+  actionType    Int       @map("action_type") @db.SmallInt
+  title         String    @db.VarChar(100)
+  content       String?   @db.Text
+  operatorId    BigInt?   @map("operator_id")
+  operatorName  String?   @map("operator_name") @db.VarChar(50)
+  requestUri    String?   @map("request_uri") @db.VarChar(255)
+  requestMethod String?   @map("request_method") @db.VarChar(10)
+  ip            String?   @db.VarChar(45)
+  province      String?   @db.VarChar(100)
+  city          String?   @db.VarChar(100)
+  device        String?   @db.VarChar(100)
+  os            String?   @db.VarChar(100)
+  browser       String?   @db.VarChar(100)
+  status        Int?      @default(1) @db.SmallInt
+  errorMsg      String?   @map("error_msg") @db.VarChar(255)
+  executionTime Int?      @map("execution_time")
+  createTime    DateTime? @map("create_time") @db.Timestamptz(3)
+
+  @@index([module, actionType, createTime], map: "idx_module_action_time")
+  @@index([operatorId, createTime], map: "idx_operator_time")
+  @@index([createTime], map: "idx_time")
+  @@map("sys_log")
+}
+
+// ─────────────────────────────────────────────
+// 代码生成（dev-time 工具表）
+// ─────────────────────────────────────────────
+model GenTable {
+  id                BigInt    @id @default(autoincrement())
+  tableName         String    @unique @map("table_name") @db.VarChar(100)
+  moduleName        String?   @map("module_name") @db.VarChar(100)
+  packageName       String    @map("package_name") @db.VarChar(255)
+  businessName      String    @map("business_name") @db.VarChar(100)
+  entityName        String    @map("entity_name") @db.VarChar(100)
+  author            String    @db.VarChar(50)
+  parentMenuId      BigInt?   @map("parent_menu_id")
+  removeTablePrefix String?   @map("remove_table_prefix") @db.VarChar(20)
+  pageType          String?   @map("page_type") @db.VarChar(20)
+  createTime        DateTime? @map("create_time") @db.Timestamptz(3)
+  updateTime        DateTime? @map("update_time") @db.Timestamptz(3)
+  isDeleted         Int       @default(0) @map("is_deleted") @db.SmallInt
+
+  @@map("gen_table")
+}
+
+model GenTableColumn {
+  id            BigInt    @id @default(autoincrement())
+  tableId       BigInt    @map("table_id")
+  columnName    String?   @map("column_name") @db.VarChar(100)
+  columnType    String?   @map("column_type") @db.VarChar(50)
+  columnLength  Int?      @map("column_length")
+  fieldName     String    @map("field_name") @db.VarChar(100)
+  fieldType     String?   @map("field_type") @db.VarChar(100)
+  fieldSort     Int?      @map("field_sort")
+  fieldComment  String?   @map("field_comment") @db.VarChar(255)
+  maxLength     Int?      @map("max_length")
+  isRequired    Int?      @map("is_required") @db.SmallInt
+  isShowInList  Int?      @default(0) @map("is_show_in_list") @db.SmallInt
+  isShowInForm  Int?      @default(0) @map("is_show_in_form") @db.SmallInt
+  isShowInQuery Int?      @default(0) @map("is_show_in_query") @db.SmallInt
+  queryType     Int?      @map("query_type") @db.SmallInt
+  formType      Int?      @map("form_type") @db.SmallInt
+  dictType      String?   @map("dict_type") @db.VarChar(50)
+  createTime    DateTime? @map("create_time") @db.Timestamptz(3)
+  updateTime    DateTime? @map("update_time") @db.Timestamptz(3)
+
+  @@index([tableId], map: "idx_table_id")
+  @@map("gen_table_column")
+}
+
+// ─────────────────────────────────────────────────────────────
+// 租户域（P0-03）
+// ─────────────────────────────────────────────────────────────
+
+/// 租户（P0-03-01，平台级根表）。
+/// 口径说明：
+///  - 主键 BigInt 自增（**不套用 uuid 业务口径**）：本表是全部业务表
+///    `tenant_id` 列的取值域，且 RLS GUC `app.tenant_id`（PEL-11/CROSS-09）
+///    与 JWT tenantId 链路均按此对齐；
+///  - 平台级表**不受租户 RLS 过滤**（自指无意义），也不设 tenant_id / store_id
+///    列；公共字段用业务新表口径（timestamptz / deleted_at / version）；
+///  - `plan` 仅展示 / 计费标识，**业务运行时分支一律只判断 feature_flags**
+///    （Q10；键全集与套餐预设见 @peluvida/shared tenant-capability）。
+model Tenant {
+  id           BigInt @id @default(autoincrement())
+  /// 租户名称（展示）
+  name         String @db.VarChar(64)
+  /// 租户编码（唯一，slug 形式；登录域与日志定位用）
+  code         String @unique @db.VarChar(32)
+  /// 状态：1 正常 / 0 停用（对齐系统域 status===0 冻结口径）
+  status       Int    @default(1) @db.SmallInt
+  /// 套餐标识（starter / professional / business）
+  plan         String @default("starter") @db.VarChar(16)
+  /// 能力开关（业务代码唯一判断入口；键合法性由 shared TenantCapability 约束）。
+  /// Prisma 7 PG 连接器 Json 默认落 jsonb，不写 @db.Jsonb。
+  featureFlags Json   @default("{}") @map("feature_flags")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；业务层显式过滤）；timestamptz 防会话时区漂移
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@map("tenant")
+}
+
+// ─────────────────────────────────────────────
+// 业务域 · P0 四表（store / service_category / room / staff）
+// 权威口径：设计草案 v2（.workbuddy/tmp/biz-domain-models-draft.md）
+// ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────
+// 门店（业务域 · P0）
+// ─────────────────────────────────────────────
+/// 门店（经营载体，Tenant→Store 两级管控；需求：门店管理 PRD FR-1~FR-5）
+model Store {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤，GUC app.tenant_id）
+  tenantId      BigInt   @map("tenant_id")
+  /// 门店编码（租户内唯一，slug 形式；对外 API 与日志定位用）
+  code          String   @db.VarChar(32)
+  /// 门店名称
+  name          String   @db.VarChar(64)
+  /// 门店类型：1 直营 direct / 2 加盟 franchise
+  type          Int      @default(1) @db.SmallInt
+  /// 地址三段（行政区划名，冗余存名便于直接展示；换码由应用层维护）
+  province      String   @db.VarChar(32)
+  city          String   @db.VarChar(32)
+  district      String   @db.VarChar(32)
+  /// 详细地址（不含省市区）
+  address       String   @db.VarChar(255)
+  /// 经度（-180~180，7 位小数 ≈ 1cm 精度）
+  longitude     Decimal? @map("longitude") @db.Decimal(10, 7)
+  /// 纬度（-90~90）
+  latitude      Decimal? @map("latitude") @db.Decimal(9, 7)
+  /// 门店联系电话
+  phone         String   @db.VarChar(20)
+  /// 每周营业时段（FR-3），如 {"mon":[["09:00","18:00"]],"tue":[]}
+  businessHours Json     @default("{}") @map("business_hours")
+  /// 门店级配置覆盖（FR-4：时段粒度/预约提前量/取消截止/寄养出入住时间窗/推送开关）
+  config        Json?
+  /// 状态：1 启用 active / 0 停用 inactive（inactive 禁新建预约与订单，存量只读）
+  status        Int      @default(1) @db.SmallInt
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([tenantId, code], map: "uk_store_tenant_code")
+  @@index([tenantId], map: "idx_store_tenant_id")
+  @@map("store")
+}
+
+// ─────────────────────────────────────────────
+// 服务类目（业务域 · P0，两级树）
+// ─────────────────────────────────────────────
+/// 服务类目（两级树，叶子挂服务项；需求：服务管理 PRD FR-1）
+/// 主路径：租户级目录（storeId=NULL，总部统一管控）；storeId 非空 = 门店私有类目
+model ServiceCategory {
+  id       String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId BigInt  @map("tenant_id")
+  /// 门店 id（NULL=租户级目录【主路径】；非空=门店私有类目；业务表关联 → uuid；无外键）
+  storeId  String? @map("store_id") @db.Uuid
+  /// 类目名称（同一父级下唯一）
+  name     String  @db.VarChar(64)
+  /// 父类目 id（NULL=一级根类目；uuid 口径无哨兵值可用；两级树：NULL 或一级 id；无外键）
+  parentId String? @map("parent_id") @db.Uuid
+  /// 业务大类（统计口径锚点，两级都填）：1 洗护 / 2 美容 / 3 寄养 / 4 日托 / 5 游泳 / 6 接送 / 7 训练 / 8 医疗合作 / 9 商品 / 10 套餐
+  catType  Int     @map("cat_type") @db.SmallInt
+  /// 同级排序（小在前）
+  sort     Int     @default(0) @db.SmallInt
+  /// 状态：1 启用 / 0 停用（停用后新服务项不可挂载、新预约不可选）
+  status   Int     @default(1) @db.SmallInt
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；删除前需校验无在挂服务项与子类目）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([tenantId, storeId, parentId, name], map: "uk_service_category_scope")
+  @@index([tenantId], map: "idx_service_category_tenant_id")
+  @@index([tenantId, storeId], map: "idx_service_category_tenant_store")
+  @@index([parentId], map: "idx_service_category_parent_id")
+  @@map("service_category")
+}
+
+// ─────────────────────────────────────────────
+// 寄养房间（业务域 · P0）
+// ─────────────────────────────────────────────
+/// 寄养房间（房态看板 / 容量载体；需求：门店管理 PRD FR-2、寄养管理 PRD FR-1）
+/// status 为运行时房态：1/2/3 由 stay 状态机自动流转，4 人工维护；
+/// 占用与超卖判定的权威数据源是 stay 在住数（本表 status 仅看板展示/预筛）
+model Room {
+  id           String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId     BigInt  @map("tenant_id")
+  /// 门店 id（房间必属门店；业务表关联 → uuid；无外键）
+  storeId      String  @map("store_id") @db.Uuid
+  /// 房间名称（展示用，可空；看板优先显示名称，缺省回退编号）
+  name         String? @db.VarChar(64)
+  /// 房间编号（门店内唯一，如 A03）
+  roomNo       String  @map("room_no") @db.VarChar(16)
+  /// 房型：1 笼位 kennel / 2 独立房 suite / 3 猫房 cat / 4 狗房 dog / 5 VIP 房 vip / 6 多宠房 multi
+  roomType     Int     @default(1) @map("room_type") @db.SmallInt
+  /// 容量（可同时容纳宠物数；多宠房 >1，超卖校验以 stay 在住数为准 + 行锁）
+  capacity     Int     @default(1) @db.SmallInt
+  /// 适用宠物体重段（PRD allow_pet_size），如 [{"min_kg":0,"max_kg":10}]
+  allowPetSize Json?   @map("allow_pet_size")
+  /// 运行时房态：1 空闲 available / 2 在住 occupied / 3 清扫中 cleaning / 4 维护中 maintenance
+  status       Int     @default(1) @db.SmallInt
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；有历史入住的房间禁止物理删除，BR-1）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([tenantId, storeId, roomNo], map: "uk_room_store_no")
+  @@index([tenantId], map: "idx_room_tenant_id")
+  @@index([tenantId, storeId, status], map: "idx_room_store_status")
+  @@map("room")
+}
+
+// ─────────────────────────────────────────────
+// 员工（业务域 · P0）
+// ─────────────────────────────────────────────
+/// 员工（门店维度档案；需求：员工管理 PRD FR-1/FR-2）
+/// 多店兼职 = 多条 staff 记录（同一 sys_user_id 复用，PRD「按 store 维度建」口径）；
+/// sys_user_id 可空 = 未开通后台账号的员工（如兼职洗护师），登录打通走应用层
+model Staff {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId  BigInt    @map("tenant_id")
+  /// 门店 id（员工必属门店；跨店兼职建多条记录；业务表关联 → uuid；无外键）
+  storeId   String    @map("store_id") @db.Uuid
+  /// 姓名
+  name      String    @db.VarChar(64)
+  /// 手机号（门店内唯一；登录/通知用）
+  mobile    String    @db.VarChar(20)
+  /// 身份证号（敏感：仅总部可见，应用层脱敏/加密；可空）
+  idCard    String?   @map("id_card") @db.VarChar(32)
+  /// 主岗位：1 店长 / 2 美容师 / 3 洗护师 / 4 寄养员 / 5 前台 / 6 训练师 / 9 其他
+  jobRole   Int       @map("job_role") @db.SmallInt
+  /// 技能角色数组（PRD roles jsonb，如 ["groomer","boarder"]；排期匹配的服务级技能在 employee_skill 表，本期不建）
+  roles     Json      @default("[]")
+  /// 关联后台账号 sys_user.id（引用系统域 BigInt 主键 → 保持 BigInt；可空=未开通后台账号；应用层关联，无外键；多店可复用同一账号）
+  sysUserId BigInt?   @map("sys_user_id")
+  /// 入职日期
+  joinedAt  DateTime? @map("joined_at") @db.Date
+  /// 离职日期（resigned 时必填）
+  leftAt    DateTime? @map("left_at") @db.Date
+  /// 状态：1 在职 active / 2 请假 leave / 0 离职 resigned（终态；对齐 0=停用语义）
+  status    Int       @default(1) @db.SmallInt
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；离职与逻辑删除并存：resigned=业务终态，deleted_at=误建档清理）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([tenantId, storeId, mobile], map: "uk_staff_store_mobile")
+  @@index([tenantId], map: "idx_staff_tenant_id")
+  @@index([tenantId, storeId, status], map: "idx_staff_store_status")
+  @@index([sysUserId], map: "idx_staff_sys_user_id")
+  @@map("staff")
+}
+
+// ─────────────────────────────────────────────
+// 门店日历（业务域 · P0-04-04 · FR-3 日期级例外）
+// ─────────────────────────────────────────────
+/// 门店日历（P0-04-04）：日期级营业例外，优先级高于每周营业时段（store.business_hours）。
+/// 口径：
+///  - type：1 节假日闭店 holiday / 2 临时闭店 closure / 3 特殊营业 special；
+///    type=1/2 当日全天闭店，open_time/close_time 刻意置 NULL；
+///    type=3 当日按 open_time~close_time 营业（两列必填，应用层校验 close > open）；
+///  - 同租户同门店同日期仅一条（uk_store_calendar_tenant_store_date；软删不腾位，
+///    与 store/room 唯一索引「不区分软删」的既有口径一致）；
+///  - uuid 主键业务新表口径；store_id 关联 uuid 无外键；RLS 走 app_enable_tenant_rls()
+///    模板（见迁移 20261006090000_store_calendar）。
+model StoreCalendar {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId  BigInt   @map("tenant_id")
+  /// 门店 id（业务表关联 → uuid；无外键）
+  storeId   String   @map("store_id") @db.Uuid
+  /// 例外日期（DATE，无时间语义；应用层以 UTC 午夜瞬时承载，规避进程时区漂移）
+  date      DateTime @db.Date
+  /// 类型：1 节假日闭店 / 2 临时闭店 / 3 特殊营业
+  type      Int      @db.SmallInt
+  /// 特殊营业开始时间（仅 type=3 使用；HH:mm）
+  openTime  String?  @map("open_time") @db.VarChar(5)
+  /// 特殊营业结束时间（仅 type=3 使用；HH:mm，必须大于 openTime）
+  closeTime String?  @map("close_time") @db.VarChar(5)
+  /// 备注（如「春节假期」「设备检修」）
+  remark    String?  @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([tenantId, storeId, date], map: "uk_store_calendar_tenant_store_date")
+  @@index([tenantId, storeId], map: "idx_store_calendar_tenant_store")
+  @@map("store_calendar")
+}
+
+// ─────────────────────────────────────────────
+// 客户域（业务域 · P0-05：customer / customer_pet / reach_log / blacklist）
+// ─────────────────────────────────────────────
+/// 萌主档案（P0-05-01 / P0-05-02 FR-1；客户域四表之首）
+/// 口径说明：
+///  - 主键 uuid 业务新表口径；store_id 可空=租户级客户（门店归属为业务归属，非隔离维度）；
+///  - **手机号租户内唯一走「部分唯一索引」**（uk_customer_tenant_mobile，
+///    WHERE deleted_at IS NULL——软删释放手机号，手机号是强复用资源）；
+///    PG 部分唯一索引 Prisma schema 无法表达（写了 @@unique 会生成全量唯一索引，
+///    与手写迁移的部分索引冲突），故本 model 不声明 @@unique，唯一性由
+///    迁移 20261007114800_customer_domain_tables 手写 SQL 落库 + 应用层查重
+///    （findFirst 先行给友好业务码 A0501）+ P2002 捕获兜底三层保证；
+///  - source 合法值域见 @peluvida/shared CustomerSource；
+///  - RLS 走 app_enable_tenant_rls() 模板（见迁移末尾）。
+model Customer {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId         BigInt    @map("tenant_id")
+  /// 门店 id（NULL=租户级客户；业务表关联 → uuid；无外键）
+  storeId          String?   @map("store_id") @db.Uuid
+  /// 客户（宠主）姓名
+  name             String    @db.VarChar(64)
+  /// 手机号（租户内唯一，部分唯一索引 uk_customer_tenant_mobile，软删释放；见 model 注释）
+  mobile           String    @db.VarChar(20)
+  /// 性别：1 男 / 2 女 / 0 未知（可空=未登记）
+  gender           Int?      @db.SmallInt
+  /// 生日（DATE，无时间语义）
+  birthday         DateTime? @db.Date
+  /// 客户来源：1 自然进店 / 2 转介绍 / 3 团购 / 4 小程序 / 9 其他（@peluvida/shared CustomerSource）
+  source           Int?      @db.SmallInt
+  /// 备注
+  remark           String?   @db.VarChar(500)
+  /// 生命周期分层：1 新客 / 2 活跃 / 3 沉睡 / 4 流失（P0-05-06 FR-6；
+  /// 合法值域见 @peluvida/shared CustomerLifecycle；非空，默认 1 新客）
+  lifecycle        Int       @default(1) @map("lifecycle") @db.SmallInt
+  /// 触达偏好（P0-05-04 FR-3：允许/拒绝渠道 + 免打扰时段；结构见
+  /// @peluvida/shared CustomerReachPreference）。Prisma 7 PG 连接器 Json
+  /// 默认落 jsonb，不写 @db.Jsonb（踩坑 26）。
+  reachPreferences Json      @default("{}") @map("reach_preferences")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；部分唯一索引 WHERE deleted_at IS NULL——软删后手机号可复用）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_customer_tenant_id")
+  @@index([tenantId, mobile], map: "idx_customer_tenant_mobile")
+  @@index([tenantId, lifecycle], map: "idx_customer_tenant_lifecycle")
+  @@map("customer")
+}
+
+/// 宠物归属关系（P0-05-01；P0-05-03 萌主-宠物关联的落库基础）
+/// 口径说明：
+///  - customerId / petId 均为业务表关联 uuid、无外键（跨表一致性由业务层保证）；
+///  - **petId 本期是「悬空 uuid 列」**：宠物实体表（P0-06 宠物域）尚未建模，
+///    列先落位避免后续迁移改表；宠物名/类型以 pet_name / pet_type 冗余快照存
+///    （P0-06 落地后回填关联，快照保历史可读）；
+///  - isPrimary 标主要宠物（档案展示首位；同客户可多条归属记录）。
+model CustomerPet {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId   BigInt   @map("tenant_id")
+  /// 萌主档案 id（→ customer.id；业务表关联 → uuid；无外键）
+  customerId String   @map("customer_id") @db.Uuid
+  /// 宠物 id（⚠️ 悬空 uuid：宠物实体表 P0-06 落地前无被引用表；无外键）
+  petId      String   @map("pet_id") @db.Uuid
+  /// 宠物名（冗余快照，P0-06 前无实体表可关联）
+  petName    String?  @map("pet_name") @db.VarChar(64)
+  /// 宠物类型：1 犬 / 2 猫 / 9 其他（@peluvida/shared PetType）
+  petType    Int?     @map("pet_type") @db.SmallInt
+  /// 是否主要宠物（同客户唯一主宠由应用层保证；NULL=未标记）
+  isPrimary  Boolean? @map("is_primary")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_customer_pet_tenant_id")
+  @@index([tenantId, customerId], map: "idx_customer_pet_tenant_customer")
+  @@map("customer_pet")
+}
+
+/// 触达日志（P0-05-01；对客户的渠道触达留痕，append-only——业务层不提供 UPDATE/DELETE）
+/// channel 合法值域见 @peluvida/shared ReachChannel；operatorId 引用 sys_user BigInt 主键。
+model ReachLog {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId   BigInt   @map("tenant_id")
+  /// 萌主档案 id（→ customer.id；业务表关联 → uuid；无外键）
+  customerId String   @map("customer_id") @db.Uuid
+  /// 触达渠道：1 站内信 / 2 服务号 / 3 订阅消息 / 4 短信
+  channel    Int      @db.SmallInt
+  /// 触达模板标识/名称（P0-05-04 FR-3；可空=非模板触达，仅内容摘要）
+  template   String?  @db.VarChar(64)
+  /// 触达内容摘要（可空=纯事件型触达）
+  content    String?  @db.VarChar(500)
+  /// 触达结果：1 成功 / 2 失败（P0-05-04 FR-3；@peluvida/shared ReachResult；可空=未回执）
+  result     Int?     @db.SmallInt
+  /// 实际触达时间（P0-05-04 FR-3；业务可回填历史触达，缺省取写入时刻）
+  reachedAt  DateTime @default(now()) @map("reached_at") @db.Timestamptz(3)
+  /// 操作人（引用 sys_user BigInt 主键；NULL=系统自动触达）
+  operatorId BigInt?  @map("operator_id")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；append-only 语义由业务层不提供改删接口保证）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁（公共字段口径统一携带；append-only 表业务上不使用）
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_reach_log_tenant_id")
+  @@index([tenantId, customerId], map: "idx_reach_log_tenant_customer")
+  @@index([tenantId, customerId, reachedAt], map: "idx_reach_log_tenant_customer_time")
+  @@map("reach_log")
+}
+
+/// 黑名单（P0-05-01；P0-05-04 黑名单管控的落库基础）
+/// storeId NULL=租户级黑名单（全门店生效）；非空=门店级。status：1 生效 / 0 解除
+/// （解除保留行为记录，不物理删）；operatorId 引用 sys_user BigInt 主键。
+model Blacklist {
+  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId      BigInt  @map("tenant_id")
+  /// 萌主档案 id（→ customer.id；业务表关联 → uuid；无外键）
+  customerId    String  @map("customer_id") @db.Uuid
+  /// 门店 id（NULL=租户级黑名单；非空=门店级；业务表关联 → uuid；无外键）
+  storeId       String? @map("store_id") @db.Uuid
+  /// 拉黑原因
+  reason        String  @db.VarChar(255)
+  /// 解除原因（NULL=未解除；PRD《客户管理》BR-2「移出黑名单必须填写原因」）
+  releaseReason String? @map("release_reason") @db.VarChar(255)
+  /// 状态：1 生效 / 0 解除（@peluvida/shared BlacklistStatus）
+  status        Int     @default(1) @db.SmallInt
+  /// 操作人（引用 sys_user BigInt 主键；NULL=系统动作）
+  operatorId    BigInt? @map("operator_id")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_blacklist_tenant_id")
+  @@index([tenantId, customerId], map: "idx_blacklist_tenant_customer")
+  @@index([tenantId, status], map: "idx_blacklist_tenant_status")
+  /// 硬拦截命中查询（checkBlocked）：按 (tenant, customer, status) 快速定位生效记录
+  @@index([tenantId, customerId, status], map: "idx_blacklist_tenant_customer_status")
+  @@map("blacklist")
+}
+
+// ─────────────────────────────────────────────
+// 审计日志（业务域 · P0-02-08，按月分区 append-only）
+// ─────────────────────────────────────────────
+/// 审计日志（P0-02-08）：业务关键操作变更留痕，append-only（不可改删）。
+/// 口径说明：
+///  - 主键对齐业务新表口径取 uuid（库层 gen_random_uuid 生成；评估报告 3.1 草案的
+///    BigInt 自增写于 CROSS-08 uuid 口径澄清前，此处按本文件头注释口径校正）；
+///  - **分区表在 Prisma 层就是普通模型**：父表按 created_at RANGE 按月分区，
+///    由手写迁移 20261005170000_audit_log_partitioned 实现（Prisma migrate diff
+///    不理解分区 DDL，故 schema 只建模型、分区 SQL 手写并 migrate deploy 固化）；
+///  - 分区表的主键约束在 PG 里必须包含分区键 ⇒ DB 侧 PRIMARY KEY (id, created_at)
+///    复合主键，model 以 @@id([id, createdAt]) 对齐（单字段 @id 无法表达该约束），
+///    因此本表查询走 findMany / 索引路径，不支持按单字段 id 的 findUnique；
+///  - RLS 用 app_enable_tenant_rls() 模板（ENABLE + FORCE + 双向策略）：
+///    读侧 fail-closed；写侧「INSERT 的 tenant_id 必须等于事务内 GUC app.tenant_id」，
+///    由 AuditService 保证（withTenantContext / 事务内 set_config），见迁移注释；
+///  - **有意裁剪**公共字段中的 updated_at / updated_by / deleted_at / version：
+///    append-only 表提供修改语义字段等于诱导修改，与「不可改删」目标矛盾（防误读）；
+///  - operatorId 可空 + operatorType 区分 user/system（Q4，按评估推荐，待拍板可调）；
+///    before/after 只存变更字段 diff（Q5，按评估推荐，待拍板可调）；
+///    tenant_id 记被操作数据所属租户，0 = 平台级对象哨兵（Q6，按评估推荐，待拍板可调）。
+model AuditLog {
+  id String @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  /// 数据租户归属（RLS 读锚点；记被操作数据所属租户，平台级对象为 0 哨兵——Q6）
+  tenantId BigInt  @map("tenant_id")
+  /// 门店 id（X-Store-Id 锚点；引用 store.uuid 主键 → 业务表关联 uuid 口径；平台级操作 NULL）
+  storeId  String? @map("store_id") @db.Uuid
+
+  /// 审计对象类型（业务表名 slug，合法值域见 @peluvida/shared AuditEntityType）
+  entityType String @map("entity_type") @db.VarChar(64)
+  /// 审计对象 ID（业务表主键的字符串形态，兼容 BigInt / uuid 双口径）
+  entityId   String @map("entity_id") @db.VarChar(64)
+
+  /// 动作（SmallInt 枚举，合法值域见 @peluvida/shared AuditAction）
+  action Int @db.SmallInt
+
+  /// 变更前快照（仅变更字段，写入侧已脱敏；create 为 NULL，delete 存全量）
+  before Json?
+  /// 变更后快照（仅变更字段，写入侧已脱敏）
+  after  Json?
+
+  /// 操作人（NULL = 系统动作；引用 sys_user BigInt 主键，非 uuid 口径）
+  operatorId   BigInt? @map("operator_id")
+  /// 操作人类型：1 用户 user / 0 系统 system（Q4）
+  operatorType Int     @default(1) @map("operator_type") @db.SmallInt
+  /// 操作人姓名快照（冗余存储：用户改名 / 删除后审计仍可读）
+  operatorName String? @map("operator_name") @db.VarChar(50)
+
+  /// 客户端 IP（防抵赖最小集；UA 等运维字段留在 sys_log，不重复）
+  ip             String? @db.VarChar(45)
+  /// 关联 CROSS-14 结构化日志的追踪 ID
+  traceId        String? @map("trace_id") @db.VarChar(64)
+  /// 幂等键（A4：POST / 支付类必带，审计关联用）
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(64)
+
+  /// 记录时间（**分区键**：按月 RANGE 分区，勿删）
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  /// 分区表主键必须含分区键（PG 约束）⇒ 复合主键，DB 侧为 (id, created_at)
+  @@id([id, createdAt])
+  @@index([tenantId, entityType, entityId, createdAt], map: "idx_audit_entity")
+  @@index([tenantId, operatorId, createdAt], map: "idx_audit_operator")
+  @@index([tenantId, createdAt], map: "idx_audit_tenant_time")
+  @@map("audit_log")
+}
+
+// ─────────────────────────────────────────────
+// 宠物域（业务域 · P0-06：pet / health_record / weight / behavior_tag +
+// pet_behavior_tag / timeline_event）
+// ─────────────────────────────────────────────
+// 口径对齐业务新表公共字段（CROSS-08）：uuid 主键（库层 gen_random_uuid）+
+// tenant_id BIGINT + 业务表间关联 Uuid + 引用 sys_user 的列保持 BigInt? +
+// TIMESTAMPTZ(3) 逐列显式 + 软删 deleted_at + 乐观锁 version；无数据库外键。
+// RLS 走 app_enable_tenant_rls() 模板（迁移 20261007150000_pet_domain_tables）。
+
+// ─────────────────────────────────────────────
+// 宠物档案（业务域 · P0-06-01 / P0-06-02 FR-1）
+// ─────────────────────────────────────────────
+/// 宠物档案（宠物域核心数据，P0-06-01 建模 / P0-06-02 FR-1 全字段 CRUD）
+/// 口径说明：
+///  - 主人关联 ownerCustomerId → customer.id（业务表关联 uuid、无外键；
+///    归属校验由应用层保证：scoped 查询限定租户内 + 未软删，跨租户主人 → A0603）；
+///  - weightKg 是「当前体重快照」（展示/分房体重段判定用），历史序列走 weight 表；
+///  - photoUrl 存主图（VARCHAR 500），多图数组放 photos Json?（口径取舍见迁移注释）；
+///  - profileCompleteness 完整度评分 0~100：由 PetService 的纯函数
+///    calcProfileCompleteness 按关键字段权重计算，create/update 时重算写入；
+///  - petType 合法值域 @peluvida/shared PetType（1 犬 / 2 猫 / 9 其他，复用禁改）。
+model Pet {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId            BigInt    @map("tenant_id")
+  /// 门店 id（可空=租户级档案；业务表关联 → uuid；无外键）
+  storeId             String?   @map("store_id") @db.Uuid
+  /// 主人（萌主档案）id（→ customer.id；业务表关联 → uuid；无外键）
+  ownerCustomerId     String    @map("owner_customer_id") @db.Uuid
+  /// 宠物名
+  name                String    @db.VarChar(64)
+  /// 宠物类型：1 犬 / 2 猫 / 9 其他（@peluvida/shared PetType）
+  petType             Int       @map("pet_type") @db.SmallInt
+  /// 品种
+  breed               String?   @db.VarChar(64)
+  /// 性别：1 公 / 2 母（可空=未登记）
+  gender              Int?      @db.SmallInt
+  /// 生日（DATE，无时间语义；应用层以 UTC 午夜瞬时承载）
+  birthday            DateTime? @db.Date
+  /// 当前体重快照 kg（历史序列走 weight 表）
+  weightKg            Decimal?  @map("weight_kg") @db.Decimal(5, 2)
+  /// 毛色
+  coatColor           String?   @map("coat_color") @db.VarChar(32)
+  /// 绝育（可空=未登记）
+  sterilized          Boolean?
+  /// 芯片号
+  chipNo              String?   @map("chip_no") @db.VarChar(64)
+  /// 主图 URL
+  photoUrl            String?   @map("photo_url") @db.VarChar(500)
+  /// 多图 URL 数组（如 ["https://…","https://…"]；主图外的补充图）
+  photos              Json?
+  /// 完整度评分 0~100（create/update 时由 calcProfileCompleteness 重算写入）
+  profileCompleteness Int       @default(0) @map("profile_completeness")
+  /// 备注
+  remark              String?   @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_pet_tenant_id")
+  @@index([tenantId, ownerCustomerId], map: "idx_pet_tenant_owner")
+  @@map("pet")
+}
+
+// ─────────────────────────────────────────────
+// 健康档案（业务域 · P0-06-01；P0-06-03 FR-2 的落库基础）
+// ─────────────────────────────────────────────
+/// 健康档案记录（append-only 语义：业务层不提供 UPDATE/DELETE）
+/// recordType：1 疫苗 / 2 驱虫 / 3 过敏 / 4 用药 / 5 绝育 / 6 慢病；
+/// expireDate 供疫苗/驱虫到期提醒（P0-06-03 扫描索引 idx_health_record_tenant_type_expire）。
+model HealthRecord {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId   BigInt    @map("tenant_id")
+  /// 宠物 id（→ pet.id；业务表关联 → uuid；无外键）
+  petId      String    @map("pet_id") @db.Uuid
+  /// 记录类型：1 疫苗 / 2 驱虫 / 3 过敏 / 4 用药 / 5 绝育 / 6 慢病
+  recordType Int       @map("record_type") @db.SmallInt
+  /// 记录日期（DATE，无时间语义）
+  recordDate DateTime  @map("record_date") @db.Date
+  /// 到期日期（疫苗/驱虫复种到期；P0-06-03 提醒任务扫描消费）
+  expireDate DateTime? @map("expire_date") @db.Date
+  /// 内容摘要（疫苗厂家/批次、用药剂量等）
+  content    String?   @db.VarChar(500)
+  /// 操作人（引用 sys_user BigInt 主键）
+  operatorId BigInt?   @map("operator_id")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；append-only 语义由业务层不提供改删接口保证）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁（公共字段口径统一携带；append-only 表业务上不使用）
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_health_record_tenant_id")
+  @@index([tenantId, petId], map: "idx_health_record_tenant_pet")
+  @@index([tenantId, recordType, expireDate], map: "idx_health_record_tenant_type_expire")
+  @@map("health_record")
+}
+
+// ─────────────────────────────────────────────
+// 体重记录（业务域 · P0-06-01；P0-06-04 FR-3 体重曲线的落库基础）
+// ─────────────────────────────────────────────
+/// 体重记录（append-only 语义：历史序列不可改，错录补一条修正记录）
+model Weight {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId  BigInt   @map("tenant_id")
+  /// 宠物 id（→ pet.id；业务表关联 → uuid；无外键）
+  petId     String   @map("pet_id") @db.Uuid
+  /// 称重日期（DATE，无时间语义）
+  weighedAt DateTime @map("weighed_at") @db.Date
+  /// 体重 kg
+  weightKg  Decimal  @map("weight_kg") @db.Decimal(5, 2)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；append-only 语义由业务层不提供改删接口保证）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁（公共字段口径统一携带；append-only 表业务上不使用）
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_weight_tenant_id")
+  @@index([tenantId, petId, weighedAt], map: "idx_weight_tenant_pet_date")
+  @@map("weight")
+}
+
+// ─────────────────────────────────────────────
+// 行为标签（业务域 · P0-06-01；P0-06-05 FR-4 的落库基础）
+// ─────────────────────────────────────────────
+/// 行为标签定义（租户级：咬人 / 应激等；两表方案之「标签定义」表）
+/// P0-06-05 联动房间分配与照护任务（如咬人宠物禁同房）按 name/status 消费。
+model BehaviorTag {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId BigInt @map("tenant_id")
+  /// 标签名（租户内唯一）
+  name     String @db.VarChar(32)
+  /// 展示排序（小在前）
+  sort     Int    @default(0)
+  /// 状态：1 启用 / 0 停用（停用后新宠物不可挂，存量关联保留）
+  status   Int    @default(1) @db.SmallInt
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([tenantId, name], map: "uk_behavior_tag_tenant_name")
+  @@index([tenantId], map: "idx_behavior_tag_tenant_id")
+  @@map("behavior_tag")
+}
+
+/// 宠物-行为标签关联（两表方案之「关联」表；多对多）
+/// 关联本身无业务历史语义：摘除标签走物理 DELETE（关联行不参与软删），
+/// (petId, tagId) 全量唯一（软删态不参与——摘除即删行，重挂无冲突）。
+model PetBehaviorTag {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId BigInt @map("tenant_id")
+  /// 宠物 id（→ pet.id；业务表关联 → uuid；无外键）
+  petId    String @map("pet_id") @db.Uuid
+  /// 行为标签 id（→ behavior_tag.id；业务表关联 → uuid；无外键）
+  tagId    String @map("tag_id") @db.Uuid
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；口径上关联行只增删不软删，字段按公共口径统一携带）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([petId, tagId], map: "uk_pet_behavior_tag")
+  @@index([tenantId], map: "idx_pet_behavior_tag_tenant_id")
+  @@index([tenantId, petId], map: "idx_pet_behavior_tag_tenant_pet")
+  @@map("pet_behavior_tag")
+}
+
+// ─────────────────────────────────────────────
+// 宠物时间线（业务域 · P0-06-01；P0-06-06/07 FR-5 的落库基础，按月分区）
+// ─────────────────────────────────────────────
+/// 宠物时间线事件（各业务模块统一事件流；按 eventTime RANGE 按月分区）
+/// 口径说明（对齐 audit_log 分区先例，迁移 20261005170000 / 20261007150000 /
+/// 20261007180000 统一事件模型）：
+///  - **分区表在 Prisma 层就是普通模型**：分区 DDL 手写在迁移里（Prisma migrate
+///    diff 不理解分区），model 只对齐表结构与复合主键；
+///  - 分区表主键必须含分区键 ⇒ DB 侧 PRIMARY KEY (id, event_time)，model 以
+///    @@id([id, eventTime]) 对齐；id 取 BigInt 自增（事件流高写入量，uuid 无谓膨胀，
+///    复合主键已含分区键防重）；查询走 findMany / 索引路径（不支持单 id findUnique）；
+///  - **有意裁剪**公共字段中的 updated_at / updated_by / deleted_at / version
+///    （对齐 audit_log 裁剪口径）：事件表行数大、字段瘦身；
+///  - **append-only（P0-06-07）**：迁移 20261007180000 为父表加「BEFORE UPDATE/DELETE
+///    拦改删」行级触发器（自动作用于全部分区；GUC app.timeline_maintenance='on'
+///    为受控维护后门）。业务纠错一律通过「冲正事件」追加（timeline.event.revised），
+///    原事件保持不变；本 model 不含改删入口（service 不提供 UPDATE/DELETE）；
+///  - **统一事件模型（P0-06-06）**：eventName（`模块.动作`，合法值域见
+///    @peluvida/shared TIMELINE_EVENT_NAMES）+ payload（结构化负载）+
+///    refType/refId（多态关联，如订单/健康记录/体重）+ actorType（1 员工/2 系统/3 宠主）；
+///  - visibleToOwner 控制宠主端可见（P0-06-06 PRD 口径）；
+///  - eventType：1 入驻 / 2 离店 / 3 喂养 / 4 洗护 / 5 医疗 / 6 体重 / 7 照片 / 8 系统。
+model TimelineEvent {
+  /// 事件 id（BIGSERIAL；分区表主键含分区键 ⇒ 与 eventTime 组成复合主键）
+  id             BigInt   @default(autoincrement())
+  /// 租户 id（RLS 强制过滤）
+  tenantId       BigInt   @map("tenant_id")
+  /// 宠物 id（→ pet.id；业务表关联 → uuid；无外键）
+  petId          String   @map("pet_id") @db.Uuid
+  /// 事件类型：1 入驻 / 2 离店 / 3 喂养 / 4 洗护 / 5 医疗 / 6 体重 / 7 照片 / 8 系统
+  eventType      Int      @map("event_type") @db.SmallInt
+  /// 统一事件名（`模块.动作`，如 health.record.created；合法值域见
+  /// @peluvida/shared TIMELINE_EVENT_NAMES；NULL=历史行/未命名事件）
+  eventName      String?  @map("event_name") @db.VarChar(64)
+  /// 事件内容摘要（人类可读）
+  content        String?  @db.VarChar(500)
+  /// 结构化负载（事件上下文快照；写侧按需脱敏）
+  payload        Json?
+  /// 多态关联对象类型（如 health_record / weight / order / stay / pet；NULL=无关联）
+  refType        String?  @map("ref_type") @db.VarChar(32)
+  /// 多态关联对象 id（字符串形态，兼容 uuid 与 bigint）
+  refId          String?  @map("ref_id") @db.VarChar(64)
+  /// 操作者类型：1 员工 / 2 系统 / 3 宠主（P0-06-06）
+  actorType      Int      @default(1) @map("actor_type") @db.SmallInt
+  /// 操作人（引用 sys_user BigInt 主键；NULL=系统事件）
+  operatorId     BigInt?  @map("operator_id")
+  /// 事件时间（**分区键**：按月 RANGE 分区，勿删）
+  eventTime      DateTime @default(now()) @map("event_time") @db.Timestamptz(3)
+  /// 宠主端可见（P0-06-06：visible_to_owner）
+  visibleToOwner Boolean  @default(true) @map("visible_to_owner")
+
+  /// 分区表主键必须含分区键（PG 约束）⇒ 复合主键，DB 侧为 (id, event_time)
+  @@id([id, eventTime])
+  @@index([tenantId, petId, eventTime], map: "idx_timeline_tenant_pet_time")
+  @@index([petId, eventTime], map: "idx_timeline_pet_time")
+  /// 按事件名筛选/排序（P0-06-06）
+  @@index([tenantId, petId, eventName, eventTime], map: "idx_timeline_tenant_pet_name_time")
+  @@map("timeline_event")
+}
+
+// ─────────────────────────────────────────────
+// 宠物转移申请（业务域 · P0-05-03 · FR-2 多宠物归属）
+// ─────────────────────────────────────────────
+/// 宠物转移申请（P0-05-03）：宠物归属（萌主）变更的审批流载体。
+/// 口径说明：
+///  - **归属变更唯一合法通道**：未审批通过前，pet.ownerCustomerId 与 customer_pet
+///    关联保持不变；仅 status=1 → 2（审批通过）时在**同一事务内**改归属；
+///  - 字段快照：fromCustomerId 在**发起时**固定（申请经审批期间主人可能已被其他
+///    申请/操作改变，快照用于审批时做「当前主人仍等于快照」的一致性校验）；
+///  - status：1 待审批 / 2 已通过 / 3 已拒绝 / 4 已撤销（数字 SmallInt，对齐业务域枚举风格）；
+///  - appliedBy / approvedBy 引用 sys_user BigInt 主键（系统域，保持 BigInt?）；
+///  - **业务不变式「同一 pet 同时仅一条 status=1 待审批申请」**由三层保证：
+///    应用层 findFirst 查重（友好码 A0515）→ **部分唯一索引**
+///    uk_pet_transfer_request_pending（WHERE status = 1，并发兜底 P2002 → A0515）
+///    → RLS 租户隔离。PG 部分唯一索引 Prisma schema 无法表达（写了 @@unique
+///    会生成全量唯一索引与手写部分索引冲突），故本 model 不声明 @@unique，
+///    唯一性由迁移 20261007160000_pet_transfer_request 手写 SQL 落库；
+///  - RLS 走 app_enable_tenant_rls() 模板（见迁移末尾）。
+model PetTransferRequest {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId       BigInt    @map("tenant_id")
+  /// 宠物 id（→ pet.id；业务表关联 → uuid；无外键）
+  petId          String    @map("pet_id") @db.Uuid
+  /// 转出方客户 id（发起时快照；→ customer.id；业务表关联 → uuid；无外键）
+  fromCustomerId String    @map("from_customer_id") @db.Uuid
+  /// 转入方客户 id（→ customer.id；业务表关联 → uuid；无外键）
+  toCustomerId   String    @map("to_customer_id") @db.Uuid
+  /// 状态：1 待审批 pending / 2 已通过 approved / 3 已拒绝 rejected / 4 已撤销 cancelled
+  status         Int       @default(1) @db.SmallInt
+  /// 申请理由（可空）
+  reason         String?   @db.VarChar(255)
+  /// 申请人（引用 sys_user BigInt 主键；可空）
+  appliedBy      BigInt?   @map("applied_by")
+  /// 审批人（引用 sys_user BigInt 主键；可空=未审批）
+  approvedBy     BigInt?   @map("approved_by")
+  /// 审批时间（可空=未审批）
+  approvedAt     DateTime? @map("approved_at") @db.Timestamptz(3)
+  /// 拒绝理由（可空；状态 3 时填写）
+  rejectReason   String?   @map("reject_reason") @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；转移申请走状态流转，正常不软删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_pet_transfer_request_tenant_id")
+  @@index([tenantId, status], map: "idx_pet_transfer_request_tenant_status")
+  @@index([tenantId, petId], map: "idx_pet_transfer_request_tenant_pet")
+  @@map("pet_transfer_request")
+}
+
+// ─────────────────────────────────────────────
+// 媒体 / 附件（业务域 · P0-08-01 媒体数据模型与多态挂接）
+// ─────────────────────────────────────────────
+/// 媒体 / 附件（P0-08：统一媒体上传 + 图片处理 + 可见性）。
+/// 口径说明（对齐业务新表公共字段口径 + 迁移 20261008120000）：
+///  - **多态挂接**：媒体不属于任何单一业务实体，以 (refType, refId) 关联任意业务实体
+///    （参照 timeline_event.ref_type / ref_id 的既有写法）——refType 为业务表名 slug
+///    （合法值域见 @peluvida/shared MEDIA_REF_TYPES），refId 为目标主键的字符串形态
+///    （VARCHAR(64) 兼容 uuid 与 bigint）；无数据库外键，跨表一致性由业务层保证；
+///  - **两阶段上传**（P0-08-02）：uploadStatus 1 pending（已预签名未确认）/ 2 confirmed
+///    （已确认可用）；objectKey 在 (storageDriver) 内唯一（uk_media_driver_object_key）；
+///  - **图片处理**（P0-08-03）：watermarked / thumbnailUrl / width / height 承载水印与
+///    缩略图结果；单实体最多 9 张由业务层按 (refType, refId) 计数强制；
+///  - **可见性**（P0-08-04）：visibleToOwner 控制宠主端可见（对齐 timeline_event.visible_to_owner）；
+///  - 主键 uuid 业务新表口径；store_id 关联 uuid 无外键；fileSize 为 BIGINT（出参字符串化）；
+///  - RLS 走 app_enable_tenant_rls() 模板（见迁移 20261008120000）。
+model Media {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId       BigInt    @map("tenant_id")
+  /// 门店 id（可空=租户级；业务表关联 → uuid；无外键）
+  storeId        String?   @map("store_id") @db.Uuid
+  /// 多态关联对象类型（业务表名 slug，合法值域见 @peluvida/shared MEDIA_REF_TYPES）
+  refType        String    @map("ref_type") @db.VarChar(32)
+  /// 多态关联对象 id（字符串形态，兼容 uuid 与 bigint）
+  refId          String    @map("ref_id") @db.VarChar(64)
+  /// 媒体类型：1 图片 / 2 视频 / 3 文档 / 9 其他（@peluvida/shared MediaType）
+  mediaType      Int       @default(1) @map("media_type") @db.SmallInt
+  /// 存储驱动：local / memory / s3 / oss（@peluvida/shared StorageDriver；凭证走 env）
+  storageDriver  String    @default("local") @map("storage_driver") @db.VarChar(16)
+  /// 存储桶名（S3/OSS 驱动；local/memory 为 NULL）
+  bucket         String?   @db.VarChar(128)
+  /// 对象键（存储内定位；同一驱动内唯一，uk_media_driver_object_key）
+  objectKey      String    @map("object_key") @db.VarChar(512)
+  /// 对外访问 URL（预签名阶段即由公开基址拼出）
+  url            String    @db.VarChar(1024)
+  /// 缩略图 URL（P0-08-03；图片专属，非图片 / 未生成时 NULL）
+  thumbnailUrl   String?   @map("thumbnail_url") @db.VarChar(1024)
+  /// 是否已施加水印（P0-08-03；图片专属，非图片恒 false）
+  watermarked    Boolean   @default(false)
+  /// MIME 类型（如 image/png）
+  mimeType       String?   @map("mime_type") @db.VarChar(128)
+  /// 文件字节数（BIGINT；出参字符串化）
+  fileSize       BigInt?   @map("file_size")
+  /// 图片宽度（像素；非图片 NULL）
+  width          Int?
+  /// 图片高度（像素；非图片 NULL）
+  height         Int?
+  /// 展示排序（小在前）
+  sort           Int       @default(0)
+  /// 宠主端可见（P0-08-04；对齐 timeline_event.visible_to_owner）
+  visibleToOwner Boolean   @default(true) @map("visible_to_owner")
+  /// 上传状态：1 pending（已预签名未确认）/ 2 confirmed（已确认可用）
+  uploadStatus   Int       @default(1) @map("upload_status") @db.SmallInt
+  /// 上传人（引用 sys_user BigInt 主键；可空）
+  uploadedBy     BigInt?   @map("uploaded_by")
+  /// 确认时间（uploadStatus=2 时写入）
+  confirmedAt    DateTime? @map("confirmed_at") @db.Timestamptz(3)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([storageDriver, objectKey], map: "uk_media_driver_object_key")
+  @@index([tenantId], map: "idx_media_tenant_id")
+  @@index([tenantId, refType, refId], map: "idx_media_tenant_ref")
+  @@index([tenantId, refType, refId, sort], map: "idx_media_tenant_ref_sort")
+  @@map("media")
+}
+
+// ─────────────────────────────────────────────
+// 预约（业务域 · P0-08-05；MVP-WEB-06-01 预约列表与状态展示的落库基础）
+// ─────────────────────────────────────────────
+/// 预约单（统一预约引擎：服务 / 宠物 / 客户 / 门店 / 员工 / 房间 / 时间 / 容量 / 状态）。
+/// 口径说明（对齐业务新表公共字段口径 + 迁移 20261012120000）：
+///  - 主键 uuid 业务新表口径；store_id / customer_id / pet_id / employee_id / room_id /
+///    service_id / prev_booking_id 均为业务表间关联 Uuid、**无外键**（跨表一致性业务层保证）；
+///  - 🔴 **status 存 snake_case 字符串**（pending / confirmed / in_service / completed /
+///    cancelled / no_show / rescheduled）—— 唯一来源 `@peluvida/shared` 的 BOOKING_STATUS_META
+///    （其 StatusMeta.value 注释明确「与后端枚举、DB 存储值一致，snake_case」）。
+///    刻意区别于 store/room 等 SmallInt 数字状态：预约状态机是**三端共享的字符串契约**，
+///    存数字会引入第二套「数字↔字符串」映射（踩坑 126-bis 双源漂移）。
+///  - **service_id 本期是「悬空 uuid 列」**：服务项（service_item）表尚未建模 ⇒
+///    先落列避免后续迁移改表；service_name 冗余快照存展示用（对齐 customer_pet.pet_name 先例）。
+///  - booking_no 租户内唯一（uk_booking_tenant_no，业务单号，应用层生成，形如 BK+yyyymmdd+序号）；
+///    prev_booking_id 承载改期互链（BR-1：改期生成新单 + 原单置 rescheduled）。
+///  - **本任务只落 booking 表**：PRD 字段设计中另有 booking_time_slot（时段占用表），
+///    其写入方是容量校验（MVP-WEB-06-04）与创建/改期事务，届时随该任务一并落库，
+///    避免先建无人写入、无法验证的空表。
+///  - RLS 走 app_enable_tenant_rls() 模板（见迁移末尾）。
+model Booking {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId      BigInt   @map("tenant_id")
+  /// 门店 id（预约必属门店；业务表关联 → uuid；无外键）
+  storeId       String   @map("store_id") @db.Uuid
+  /// 客户（宠主）id（→ customer.id；业务表关联 → uuid；无外键）
+  customerId    String   @map("customer_id") @db.Uuid
+  /// 宠物 id（→ pet.id；业务表关联 → uuid；无外键）
+  petId         String   @map("pet_id") @db.Uuid
+  /// 服务项 id（⚠️ 悬空 uuid：service_item 表尚未建模；无外键）
+  serviceId     String?  @map("service_id") @db.Uuid
+  /// 服务项名称（冗余快照，列表展示用；service_item 建模前无实体表可关联）
+  serviceName   String?  @map("service_name") @db.VarChar(64)
+  /// 业务单号（租户内唯一，uk_booking_tenant_no）
+  bookingNo     String   @map("booking_no") @db.VarChar(32)
+  /// 预约日期（DATE，无时间语义；应用层以 UTC 午夜瞬时承载，规避进程时区漂移）
+  bookingDate   DateTime @map("booking_date") @db.Date
+  /// 预约时段开始（TIMESTAMPTZ）
+  startTime     DateTime @map("start_time") @db.Timestamptz(3)
+  /// 预约时段结束（TIMESTAMPTZ）
+  endTime       DateTime @map("end_time") @db.Timestamptz(3)
+  /// 指定员工 id（→ staff.id；业务表关联 → uuid；无外键；可空=未指定）
+  employeeId    String?  @map("employee_id") @db.Uuid
+  /// 指定房间 id（→ room.id；寄养 / 日托类必填，其余可空；无外键）
+  roomId        String?  @map("room_id") @db.Uuid
+  /// 状态（snake_case 字符串；值域见 @peluvida/shared BookingStatus）
+  status        String   @default("pending") @db.VarChar(16)
+  /// 改期前的关联预约 id（BR-1 改期互链；业务表关联 → uuid；无外键；可空）
+  prevBookingId String?  @map("prev_booking_id") @db.Uuid
+  /// 备注
+  remark        String?  @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删；预约走状态流转，正常不软删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([tenantId, bookingNo], map: "uk_booking_tenant_no")
+  @@index([tenantId], map: "idx_booking_tenant_id")
+  @@index([tenantId, storeId, bookingDate], map: "idx_booking_tenant_store_date")
+  @@index([tenantId, status], map: "idx_booking_tenant_status")
+  @@index([tenantId, petId], map: "idx_booking_tenant_pet")
+  @@map("booking")
+}
+
+// ─────────────────────────────────────────────
+// 预约时段占用（业务域 · MVP-WEB-06-04 容量校验 API）
+// ─────────────────────────────────────────────
+/// 时段占用行（PRD《预约管理》字段设计 · booking_time_slot）。
+///
+/// 口径：
+///  - **占用事实的物化投影**：每行 = 一个「占用态预约」对**一种资源**（员工 / 房间）的
+///    一段占用区间。由 `booking` 表上的触发器 `trg_booking_time_slot_sync`
+///    （函数 `app_sync_booking_time_slot()`）在**同一事务内**自动维护（INSERT / UPDATE /
+///    DELETE 三向同步）：预约进入释放态（`cancelled` / `no_show` / `rescheduled`）或被软删
+///    ⇒ 占用行即时消失；区间 / 资源变更 ⇒ 重建。
+///  - 🔴 **占用判定的唯一来源**：`POST /bookings/capacity-check`（06-04）与
+///    `POST /bookings/calendar/conflict-check`（06-03）**都只读本表**，不再各自按
+///    `booking.status` 现算 —— 否则「按预约状态算」与「按占用表算」就是同一判据的两处来源
+///    （踩坑 126-bis）。派生下沉到触发器而非应用层，是为了让**漂移在结构上不可能发生**
+///    （应用层每个写点漏写一次就静默算错容量）。
+///  - `resource_type`：`employee` / `room`（PRD 枚举），值域唯一来源
+///    `booking.constants.ts` 的 `BOOKING_RESOURCE_TYPES`；`resource_id` 为
+///    `staff.id` / `room.id`（业务表关联 → uuid，无外键）。
+///  - `booking_id` → `booking.id`。本表是预约的**从属占用行**（非业务关联），生命周期完全
+///    跟随预约 ⇒ 刻意同样**不建外键**（沿用全仓「业务表间无外键」口径），改由触发器在预约
+///    硬删时级联清理 —— 孤儿占用行会**静默污染容量判定**（宁可漏算也不能算错），
+///    故这一路必须有确定性兜底。
+///  - `start_time` / `end_time` 与 `booking` 的时段**逐字一致**（不另做取整 / 拆分）：
+///    「逐日」是**读侧**的聚合口径（寄养按日校验），不是写入侧的切分方式。
+///  - 占用行是**派生运行时态**（历史价值由 `booking` 承载）⇒ 触发器采用**物理删除**，
+///    `deleted_at` / `version` 仅为对齐公共字段口径而保留（恒为 NULL / 0）；
+///    读取侧仍统一过滤 `deletedAt: null`，防人工写入污染。
+///  - RLS 走 `app_enable_tenant_rls()` 模板（见迁移末尾）。
+model BookingTimeSlot {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId     BigInt   @map("tenant_id")
+  /// 资源类型：employee 员工 / room 房间（值域见 booking.constants BOOKING_RESOURCE_TYPES）
+  resourceType String   @map("resource_type") @db.VarChar(16)
+  /// 资源 id（→ staff.id / room.id；业务表关联 → uuid；无外键）
+  resourceId   String   @map("resource_id") @db.Uuid
+  /// 关联预约 id（→ booking.id；从属占用行，由触发器级联维护）
+  bookingId    String   @map("booking_id") @db.Uuid
+  /// 占用区间开始（TIMESTAMPTZ，与 booking.start_time 一致）
+  startTime    DateTime @map("start_time") @db.Timestamptz(3)
+  /// 占用区间结束（TIMESTAMPTZ，与 booking.end_time 一致）
+  endTime      DateTime @map("end_time") @db.Timestamptz(3)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  version   Int       @default(0)
+
+  /// 同一预约对同一资源只应有一行占用（触发器重入 / 人工补写的幂等锚点）
+  @@unique([bookingId, resourceType, resourceId], map: "uk_booking_time_slot_booking_resource")
+  @@index([tenantId], map: "idx_booking_time_slot_tenant_id")
+  /// 容量校验主查询锚点：按「租户 + 资源 + 区间」取重叠占用
+  @@index([tenantId, resourceType, resourceId, startTime], map: "idx_booking_time_slot_resource_range")
+  /// 按预约回查占用行（触发器同步 / 排障）
+  @@index([tenantId, bookingId], map: "idx_booking_time_slot_booking")
+  @@map("booking_time_slot")
+}
+
+// ─────────────────────────────────────────────
+// 订单（业务域 · MVP-WEB-07-01 订单列表）
+// ─────────────────────────────────────────────
+/// 订单（PRD《订单管理》：一单一宠一闭环；状态机见 @peluvida/shared OrderStatus）。
+///
+/// 口径说明（对齐业务新表公共字段口径）：
+///  - 主键 uuid 业务新表口径；store_id / customer_id / pet_id / source_booking_id
+///    均为业务表间关联 Uuid、**无外键**（跨表一致性业务层保证）；
+///  - 🔴 **status 存 snake_case 字符串**（draft / pending_payment / paid / in_progress /
+///    completed / refunded / closed）—— 唯一来源 `@peluvida/shared` 的 `ORDER_STATUS_META`；
+///  - 金额列一律 BigInt「分」（@db.BigInt），禁用 Float / Decimal（A1 / Q6）；
+///  - order_no 租户内唯一（uk_order_tenant_no，业务单号，应用层生成，形如 OD+yyyymmdd+序号）；
+///  - credit_flag 标记赊账/挂账订单（PRD 字段设计）；
+///  - RLS 走 app_enable_tenant_rls() 模板（见迁移末尾）。
+model Order {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId        BigInt   @map("tenant_id")
+  /// 门店 id（订单必属门店；业务表关联 → uuid；无外键）
+  storeId         String   @map("store_id") @db.Uuid
+  /// 客户（宠主）id（→ customer.id；业务表关联 → uuid；无外键）
+  customerId      String   @map("customer_id") @db.Uuid
+  /// 宠物 id（→ pet.id；业务表关联 → uuid；无外键）
+  petId           String   @map("pet_id") @db.Uuid
+  /// 来源预约 id（→ booking.id；可空=非预约来源；业务表关联 → uuid；无外键）
+  sourceBookingId String?  @map("source_booking_id") @db.Uuid
+  /// 业务单号（租户内唯一，uk_order_tenant_no）
+  orderNo         String   @map("order_no") @db.VarChar(32)
+  /// 总金额（分）
+  totalAmount     BigInt   @map("total_amount") @db.BigInt
+  /// 优惠金额（分）
+  discountAmount  BigInt   @default(0) @map("discount_amount") @db.BigInt
+  /// 应付金额（分）= total_amount - discount_amount
+  payableAmount   BigInt   @map("payable_amount") @db.BigInt
+  /// 赊账标记（挂账/信用订单）
+  creditFlag      Boolean  @default(false) @map("credit_flag")
+  /// 状态（snake_case 字符串；值域见 @peluvida/shared OrderStatus）
+  status          String   @default("draft") @db.VarChar(16)
+  /// 关闭原因（MVP-WEB-07-06；值域见 @peluvida/shared ORDER_CLOSE_REASON）
+  /// manual 手动关闭 / payment_timeout 超时未支付 / customer_cancel 客户取消；仅 closed 态非空
+  closeReason     String?  @map("close_reason") @db.VarChar(24)
+  /// 关闭时刻（与 close_reason 同步写入；仅 closed 态非空）
+  closedAt        DateTime? @map("closed_at") @db.Timestamptz(3)
+  /// 备注
+  remark          String?  @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@unique([tenantId, orderNo], map: "uk_order_tenant_no")
+  @@index([tenantId], map: "idx_order_tenant_id")
+  @@index([tenantId, storeId], map: "idx_order_tenant_store")
+  @@index([tenantId, status], map: "idx_order_tenant_status")
+  @@index([tenantId, customerId], map: "idx_order_tenant_customer")
+  @@index([tenantId, createdAt], map: "idx_order_tenant_created")
+  @@map("order")
+}
+
+// ─────────────────────────────────────────────
+// 订单明细（业务域 · MVP-WEB-07-01 订单列表）
+// ─────────────────────────────────────────────
+/// 订单明细（PRD《订单管理》字段设计：服务/商品/套餐项；一单可多明细）。
+///
+/// 口径：
+///  - item_type：1 服务 / 2 商品 / 3 套餐（PRD 字段设计）；
+///  - ref_id 为多态关联（服务项 id / 商品 id / 套餐 id），业务表关联 → uuid，无外键；
+///  - discount_amount / discount_source（MVP-WEB-07-04）：优惠分摊的唯一落库载体，
+///    `order.discount_amount` = Σ 未软删行 discount_amount（服务端裁定，分摊守恒）；
+///  - refund_status / fulfill_status 为明细级状态（PRD 字段设计，本期列表页不消费，
+///    先落列位避免后续迁移改表）；
+///  - RLS 走 app_enable_tenant_rls() 模板（见迁移末尾）。
+model OrderItem {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 租户 id（RLS 强制过滤）
+  tenantId        BigInt   @map("tenant_id")
+  /// 订单 id（→ order.id；业务表关联 → uuid；无外键）
+  orderId         String   @map("order_id") @db.Uuid
+  /// 明细类型：1 服务 / 2 商品 / 3 套餐
+  itemType        Int      @map("item_type") @db.SmallInt
+  /// 关联对象 id（服务项 / 商品 / 套餐 id；业务表关联 → uuid；无外键）
+  refId           String   @map("ref_id") @db.Uuid
+  /// 明细名称（冗余快照，列表展示用）
+  itemName        String   @map("item_name") @db.VarChar(64)
+  /// 数量
+  quantity        Int      @default(1)
+  /// 单价（分）
+  unitPrice       BigInt   @map("unit_price") @db.BigInt
+  /// 该行分摊到的优惠额（分）。MVP-WEB-07-04：订单优惠按行小计比例分摊后落此列；
+  /// `order.discount_amount` 恒等于本单未软删明细行本列之和（服务端裁定，分摊守恒）。
+  discountAmount  BigInt   @default(0) @map("discount_amount") @db.BigInt
+  /// 折扣来源：0 无 / 1 手动改价 / 2 会员等级 / 3 优惠券（值域见 @peluvida/shared
+  /// OrderItemDiscountSource；当前仅 1 可达 —— 会员等级 / 优惠券域尚未建模）
+  discountSource  Int      @default(0) @map("discount_source") @db.SmallInt
+  /// 退款状态：0 未退款 / 1 部分退款 / 2 已全额退款（PRD 字段设计，本期不消费）
+  refundStatus    Int      @default(0) @map("refund_status") @db.SmallInt
+  /// 履约状态：0 未开始 / 1 进行中 / 2 已完成（PRD 字段设计，本期不消费）
+  fulfillStatus   Int      @default(0) @map("fulfill_status") @db.SmallInt
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy BigInt?   @map("created_by")
+  updatedBy BigInt?   @map("updated_by")
+  /// 逻辑删除（NULL=未删）
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  /// 乐观锁
+  version   Int       @default(0)
+
+  @@index([tenantId], map: "idx_order_item_tenant_id")
+  @@index([tenantId, orderId], map: "idx_order_item_tenant_order")
+  @@map("order_item")
+}

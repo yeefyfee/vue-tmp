@@ -56,6 +56,8 @@ export class DataScopeGuard implements CanActivate {
       roles,
       perms,
       isRoot,
+      // 租户归属随令牌一并写入上下文（PEL-11）；空值统一归一化为 null
+      tenantId: user?.tenantId ? String(user.tenantId) : null,
     });
 
     return true;

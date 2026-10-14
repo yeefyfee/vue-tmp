@@ -1,0 +1,23 @@
+## Velocity 注释（## 开头的行不会被写进产物）：
+##  - 本模板取代原 backend/entity.ts.vm（TypeORM 实体），产出可直接粘贴进 schema.prisma 的 model 块。
+##  - 🔴 血泪约定：**字段行必须以纯文本收尾，行尾不能有任何指令标记**（#if/#end/#foreach/##）。
+##    velocityjs 会吃掉紧跟在指令标记之后的换行，因此 `${fieldName} ...#end` 这种写法会让
+##    下一字段的 `/// 注释` 被粘到本行末尾，模型语法直接坏掉。
+##  - 坑中之坑：单字段、或字段都无注释的配置**看不出这个问题**（后面没有内容可粘）。
+##    所以 prismaComment / prismaOptional / prismaAttrPart / prismaMapPart 已在
+##    CodegenService.toTemplateFieldConfig() 里预拼成纯文本，模板里一个指令都不留。
+##  - 同理 #foreach / #if 必须与内容行内联，独立占行会打乱换行结构。
+/// ${businessName}
+/// 来源表：${tableName}
+///
+/// 生成自「代码生成」模块。请把本段粘贴进 `prisma/schema.prisma` 后执行
+/// `pnpm prisma:generate`（或 `prisma migrate dev`）以生成客户端类型。
+model ${entityName} {
+  id BigInt @id @default(autoincrement())
+#foreach($fieldConfig in $fieldConfigs)#if($fieldConfig.fieldName != "id")#if($fieldConfig.prismaComment != "")
+  /// ${fieldConfig.prismaComment}
+#end  ${fieldConfig.fieldName} ${fieldConfig.prismaType}${fieldConfig.prismaOptional}${fieldConfig.prismaAttrPart}${fieldConfig.prismaMapPart}
+#end#end
+
+  @@map("${tableName}")
+}

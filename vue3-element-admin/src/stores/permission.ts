@@ -132,6 +132,13 @@ const transformRoutes = (routes: RouteItem[], isTopLevel: boolean = true): Route
 
     const normalizedRoute = { ...args } as RouteRecordRaw;
 
+    // 对象实例页（含 `:param` 动态段，如 /pets/:petId）按 PRD《多标签页策略》
+    // 以工作区标签打开（多实例、key=fullPath）；sys_menu 无 tabMode 列，
+    // 由前端按路由形态推导（后端 buildRoutes 不下发该字段）。
+    if (hasDynamicSegment(args.path)) {
+      normalizedRoute.meta = { ...(args.meta ?? {}), tabMode: "detail" };
+    }
+
     if (!resolvedComponent) {
       normalizedRoute.component = undefined;
     } else {
@@ -146,6 +153,17 @@ const transformRoutes = (routes: RouteItem[], isTopLevel: boolean = true): Route
     return normalizedRoute;
   });
 };
+
+/**
+ * 路由路径是否含动态段（`:param`）
+ *
+ * 动态段 = 对象实例页（宠物档案 `/pets/:petId`、时间线 `/pets/:petId/timeline` 等），
+ * 是 PRD《多标签页策略》中「详情类页面以工作区标签打开」的判定依据；列表 / 配置页
+ * （静态路径）不进标签区（第 6 条），始终单例显示。
+ */
+function hasDynamicSegment(path?: string): boolean {
+  return !!path && path.split("/").some((segment) => segment.startsWith(":"));
+}
 
 /**
  * 解析组件

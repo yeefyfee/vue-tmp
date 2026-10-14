@@ -69,6 +69,15 @@
             </el-button>
           </div>
           <div class="page-toolbar__right">
+            <el-tooltip
+              content="默认不展示系统管理员（ROOT）账号，开启后列出、并禁止删除"
+              placement="top"
+            >
+              <div class="user-page__root-switch">
+                <span class="user-page__root-switch-label">显示超管</span>
+                <el-switch v-model="params.includeRoot" size="small" @change="handleQuery" />
+              </div>
+            </el-tooltip>
             <el-tooltip content="导入" placement="top">
               <el-button
                 v-hasPerm="'sys:user:import'"
@@ -107,7 +116,13 @@
             row-key="id"
             @selection-change="handleSelectionChange"
           >
-            <el-table-column type="selection" width="42" fixed="left" align="center" />
+            <el-table-column
+              type="selection"
+              width="42"
+              fixed="left"
+              align="center"
+              :selectable="isRowSelectable"
+            />
             <el-table-column label="昵称" min-width="140" fixed="left">
               <template #default="scope">
                 <div class="user-name-cell">
@@ -116,6 +131,9 @@
                     {{ getAvatarText(scope.row as UserItem) }}
                   </span>
                   <span>{{ scope.row.nickname || "-" }}</span>
+                  <el-tag v-if="scope.row.isRoot" type="warning" size="small" effect="plain">
+                    系统级
+                  </el-tag>
                 </div>
               </template>
             </el-table-column>
@@ -165,15 +183,26 @@
                   >
                     编辑
                   </el-button>
-                  <el-button
-                    v-hasPerm="'sys:user:delete'"
-                    type="danger"
-                    size="small"
-                    link
-                    @click="handleDelete(scope.row.id)"
-                  >
-                    删除
-                  </el-button>
+                  <span v-hasPerm="'sys:user:delete'">
+                    <el-tooltip
+                      v-if="scope.row.isRoot"
+                      content="系统管理员账号禁止删除"
+                      placement="top"
+                    >
+                      <span class="user-table__blocked">
+                        <el-button type="danger" size="small" link disabled>删除</el-button>
+                      </span>
+                    </el-tooltip>
+                    <el-button
+                      v-else
+                      type="danger"
+                      size="small"
+                      link
+                      @click="handleDelete(scope.row.id)"
+                    >
+                      删除
+                    </el-button>
+                  </span>
                   <el-button
                     v-hasPerm="'sys:user:reset-password'"
                     type="primary"
@@ -237,7 +266,12 @@
         </el-form-item>
 
         <el-form-item label="角色" prop="roleIds">
-          <el-select v-model="formData.roleIds" multiple placeholder="请选择">
+          <el-select
+            v-model="formData.roleIds"
+            multiple
+            placeholder="请选择"
+            :disabled="isEditingSelf"
+          >
             <el-option
               v-for="item in roleOptions"
               :key="item.value"
@@ -245,6 +279,9 @@
               :value="item.value"
             />
           </el-select>
+          <div v-if="isEditingSelf" class="user-form__hint">
+            不能修改自己的角色（防止管理员把自己降级后无人可管理系统）
+          </div>
         </el-form-item>
 
         <el-form-item label="手机号码" prop="mobile">
@@ -263,7 +300,9 @@
             inactive-text="禁用"
             :active-value="CommonStatus.ENABLED"
             :inactive-value="CommonStatus.DISABLED"
+            :disabled="isEditingSelf"
           />
+          <div v-if="isEditingSelf" class="user-form__hint">不能停用自己</div>
         </el-form-item>
       </el-form>
 
@@ -367,6 +406,9 @@ const { loading, list, total, params, fetchData, handleQuery, handleResetQuery }
   initialParams: {
     pageNum: 1,
     pageSize: 10,
+    // 与后端 `buildUserWhere()` 默认口径一致：不展示系统管理员（ROOT）账号。
+    // 显式写进 initialParams 是为了让「重置」也能复位这个开关（resetParams 走 Object.assign）。
+    includeRoot: false,
   },
   request: UserAPI.getPage,
   onBeforeReset: () => queryFormRef.value?.resetFields(),
@@ -409,6 +451,15 @@ const roleOptions = ref<OptionItem[]>([]);
 
 const drawerSize = computed(() => (appStore.device === DeviceEnum.DESKTOP ? "600px" : "90%"));
 
+/**
+ * 是否正在编辑「当前登录用户自己」。
+ *
+ * 后端对「改自己的角色」「停用自己」有硬拦截（防止最后一个系统管理员把自己降级
+ * 或停用后，全平台再无人能进入系统管理），前端把这两个字段置灰以给出即时反馈。
+ * 仅比对 id，不做用户名比对 —— 用户名可改，id 才是稳定标识。
+ */
+const isEditingSelf = computed(() => !!formData.id && formData.id === userStore.userInfo?.userId);
+
 const resetPasswordDialogWidth = computed(() =>
   appStore.device === DeviceEnum.DESKTOP ? "420px" : "90%"
 );
@@ -434,6 +485,17 @@ const resetPasswordRules: FormRules<ResetPasswordForm> = {
  *
  * @param row 用户行数据
  */
+/**
+ * 表格勾选可用性：系统管理员（ROOT）行不可勾选。
+ *
+ * 复选框是删除的**第二条入口** —— 只禁用行内「删除」按钮拦不住它：
+ * 勾中 ROOT 行后批量提交，后端 `deleteUsers()` 是逐个 Promise.all，
+ * 会抛「系统管理员禁止删除」并留下「部分成功、部分失败」的中间态。
+ */
+function isRowSelectable(row: UserItem): boolean {
+  return !row.isRoot;
+}
+
 function getAvatarText(row: UserItem): string {
   const text = row.nickname || row.username || "?";
   return text.slice(0, 1).toUpperCase();
@@ -648,10 +710,48 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
+.user-page {
+  &__root-switch {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    margin-right: 8px;
+  }
+
+  &__root-switch-label {
+    font-size: 13px;
+    color: var(--el-text-color-regular);
+    white-space: nowrap;
+  }
+}
+
+.user-table {
+  &__blocked {
+    display: inline-block;
+  }
+}
+
+.user-form {
+  &__hint {
+    // el-form-item__content 是 flex-wrap 容器 ⇒ 用 flex-basis 强制换行到下一行
+    flex: 1 0 100%;
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--el-text-color-secondary);
+  }
+}
+
 .user-name-cell {
   display: inline-flex;
   gap: 8px;
   align-items: center;
+  // 「系统级」标签会挤压昵称文本 —— 不允许逐字换行，宁可让列宽自动撑开
+  white-space: nowrap;
+
+  .el-tag {
+    flex-shrink: 0;
+  }
 
   &__text {
     display: inline-flex;

@@ -1,0 +1,119 @@
+# =====================================================================
+# PeluVida OS 本地依赖编排（CROSS-07）
+#
+# 职责：只起依赖服务（PostgreSQL 16 / Redis 7 / MinIO），**不打包应用**。
+#       应用（nest / vite）仍在宿主机跑，通过 localhost 端口连接本文件的服务。
+#
+# ⚠️ 本机注意：
+#   1. 本机已有多项目共用的 pg16 / redis 容器（5432 / 6379 被占用）——
+#      本机开发者**不要** `docker compose up`，直接用现有容器；
+#      本文件面向新环境（新同事 / CI / 演示机）一键拉起全套依赖。
+#   2. 用本文件启动时，需同步修改 `niulai-nest/.env.dev`：
+#      - REDIS_PASSWORD=123456（本文件 Redis 设了密码；本机共用容器无密码）
+#      - OSS_MINIO_ENDPOINT=http://localhost:9000（保持一致）
+#      - PG_* 指向本 compose 的 postgres（默认库 peluvida_dev）
+#   3. 端口 / 凭据可用环境变量覆盖（见各 ${VAR:-default}），不要把真实
+#      生产凭据写进本文件。
+#
+# 用法：
+#   docker compose -f docker/docker-compose.yml up -d        # 启动
+#   docker compose -f docker/docker-compose.yml ps           # 查看状态
+#   docker compose -f docker/docker-compose.yml down         # 停止（保留数据卷）
+#   docker compose -f docker/docker-compose.yml down -v      # 停止并清空数据
+#
+# MinIO 初始化（首次启动后建 bucket）：
+#   docker run --rm --network docker_peluvida-net minio/mc \
+#     sh -c "mc alias set local http://minio:9000 minioadmin minioadmin && mc mb local/default"
+# =====================================================================
+
+name: peluvida-deps
+
+networks:
+  peluvida-net:
+    name: peluvida-net
+    driver: bridge
+
+volumes:
+  peluvida_pgdata:
+    name: peluvida_pgdata
+  peluvida_redisdata:
+    name: peluvida_redisdata
+  peluvida_miniodata:
+    name: peluvida_miniodata
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: peluvida-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PELUVIDA_PG_USER:-admin}
+      POSTGRES_PASSWORD: ${PELUVIDA_PG_PASSWORD:-Pg@123456}
+      POSTGRES_DB: ${PELUVIDA_PG_DB:-peluvida_dev}
+      # 兼容旧客户端的密码加密方式（部分驱动默认 scram-sha-256 亦可，按需开启）
+      # POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+      TZ: Asia/Shanghai
+    ports:
+      - "${PELUVIDA_PG_PORT:-5432}:5432"
+    volumes:
+      - peluvida_pgdata:/var/lib/postgresql/data
+    networks:
+      - peluvida-net
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${PELUVIDA_PG_USER:-admin} -d ${PELUVIDA_PG_DB:-peluvida_dev}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: peluvida-redis
+    restart: unless-stopped
+    # 密码 123456 与 .env.dev 注释约定一致；AOF 持久化防缓存数据（验证码/会话）意外丢失
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${PELUVIDA_REDIS_PASSWORD:-123456}",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "everysec",
+      ]
+    ports:
+      - "${PELUVIDA_REDIS_PORT:-6379}:6379"
+    volumes:
+      - peluvida_redisdata:/data
+    networks:
+      - peluvida-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${PELUVIDA_REDIS_PASSWORD:-123456} ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  minio:
+    image: minio/minio:latest
+    container_name: peluvida-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${PELUVIDA_MINIO_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${PELUVIDA_MINIO_PASSWORD:-minioadmin}
+    ports:
+      - "${PELUVIDA_MINIO_API_PORT:-9000}:9000" # S3 API
+      - "${PELUVIDA_MINIO_CONSOLE_PORT:-9001}:9001" # 控制台 http://localhost:9001
+    volumes:
+      - peluvida_miniodata:/data
+    networks:
+      - peluvida-net
+    healthcheck:
+      # mc ready local：MinIO 官方就绪探针（等 S3 API 可服务）
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s

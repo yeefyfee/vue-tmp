@@ -18,18 +18,18 @@ export class BaseQueryDto {
   @ApiProperty({
     description: "每页记录数",
     required: false,
-    default: 10,
+    default: 20,
     minimum: 1,
     maximum: 100,
   })
   @IsOptional()
   @Transform(({ value }) =>
-    value === undefined || value === null || value === "" ? 10 : Number(value)
+    value === undefined || value === null || value === "" ? 20 : Number(value)
   )
   @IsInt()
   @Min(1)
   @Max(100)
-  pageSize?: number = 10;
+  pageSize?: number = 20;
 
   @ApiProperty({ description: "排序字段", required: false })
   @IsOptional()

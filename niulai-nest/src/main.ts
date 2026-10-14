@@ -9,14 +9,14 @@ import type { ValidationError } from "class-validator";
 import { BusinessException } from "./common/exceptions/business.exception";
 import { ErrorCode } from "./common/enums/error-code.enum";
 import { Logger } from "@nestjs/common";
+import { enableBigIntJsonSerialization } from "./common/prisma/bigint-json";
 
 async function bootstrap() {
   const logger = new Logger("Bootstrap");
-  if (typeof (BigInt.prototype as any).toJSON !== "function") {
-    (BigInt.prototype as any).toJSON = function () {
-      return this.toString();
-    };
-  }
+
+  // 必须在任何响应序列化之前完成：把 BigInt 的 JSON 形态定义为字符串，
+  // 与 TypeORM 时代 `bigNumberStrings: true` 的接口契约保持一致。
+  enableBigIntJsonSerialization();
 
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
@@ -73,8 +73,8 @@ async function bootstrap() {
 
   // Swagger 配置
   const config = new DocumentBuilder()
-    .setTitle("niulai-nest")
-    .setDescription(`niulai 全家桶（Node/Nest 11）权限管理后台接口文档`)
+    .setTitle("PeluVida OS")
+    .setDescription(`PeluVida OS —— 宠物门店数字化经营系统 · 管理端接口文档`)
     .setVersion("1.0")
     .addBearerAuth()
     .build();
@@ -104,6 +104,10 @@ async function bootstrap() {
   await app.listen(port);
   logger.log(`应用已启动: http://localhost:${port}`);
   logger.log(`接口文档: http://localhost:${port}/api-docs`);
+
+  // 优雅关闭（P0-01-03）：SIGTERM/SIGINT 时先停接新请求，再走 onModuleDestroy 链
+  // （PrismaService 断开连接池、RedisService 优雅退出），避免容器滚动时连接泄漏。
+  app.enableShutdownHooks();
 }
 
 void bootstrap();

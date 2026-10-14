@@ -4,6 +4,15 @@ node_modules/
 # Build output
 dist/
 dist-ssr/
+# 沙箱内构建前会把旧 dist 改名让路（无法直接删除，见 README），此处兜底忽略
+# ⚠️ 模式必须与实际备份名前缀对齐：此前只写 dist_bak_*/ 而实际名是 dist_stale_bak_*，
+#    导致每次构建后的备份目录以 untracked 污染 git status（见项目备忘踩坑 46）
+# ⚠️ 规范：构建前改名一律用 `dist_bak_<标签>_<ts>`（**不要前导下划线**）；
+#    `_dist_bak_*` 是误用变体，沙箱内既无法改名也无法删除，故一并兜底忽略。
+dist_stale_bak_*/
+dist_bak_*/
+_dist_bak_*/
+_dist_bak2_*/
 stats.html
 
 # Local env files

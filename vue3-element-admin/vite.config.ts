@@ -35,6 +35,9 @@ export default defineConfig(({ mode }: ConfigEnv): UserConfig => {
     resolve: {
       alias: {
         "@": pathSrc,
+        // PeluVida OS 共享包（packages/shared）直连源码：
+        // 改共享常量后 HMR 立即生效，无需先行构建，也避免"忘记 build 导致读到旧值"。
+        "@peluvida/shared": resolve(__dirname, "../packages/shared/src/index.ts"),
       },
     },
     css: {

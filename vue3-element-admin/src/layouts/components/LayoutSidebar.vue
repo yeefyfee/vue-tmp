@@ -1,8 +1,10 @@
 <template>
   <el-menu
     ref="menuRef"
+    class="layout-sidebar__menu"
+    :class="{ 'is-collapsed': isCollapsed }"
     :default-active="activeMenuPath"
-    :collapse="props.collapseOverride ?? (props.alwaysExpand ? false : !appStore.sidebar.opened)"
+    :collapse="isCollapsed"
     :background-color="menuThemeProps.backgroundColor"
     :text-color="menuThemeProps.textColor"
     :active-text-color="menuThemeProps.activeTextColor"
@@ -13,12 +15,31 @@
     @open="onMenuOpen"
     @close="onMenuClose"
   >
-    <LayoutSidebarItem
-      v-for="route in data"
-      :key="route.path"
-      :item="route"
-      :base-path="resolveFullPath(route.path)"
-    />
+    <!-- 六组一级导航（01-04）：分组由账号实际拿到的路由派生，无权限整组隐藏 -->
+    <template v-if="useGroupedMenu">
+      <el-menu-item-group v-for="group in navGroups" :key="group.key">
+        <template #title>
+          <span class="layout-sidebar__group-title">
+            {{ translateRouteTitle(group.titleKey) }}
+          </span>
+        </template>
+        <LayoutSidebarItem
+          v-for="route in group.routes"
+          :key="route.path"
+          :item="route"
+          :base-path="resolveFullPath(route.path)"
+        />
+      </el-menu-item-group>
+    </template>
+
+    <template v-else>
+      <LayoutSidebarItem
+        v-for="route in data"
+        :key="route.path"
+        :item="route"
+        :base-path="resolveFullPath(route.path)"
+      />
+    </template>
   </el-menu>
 </template>
 
@@ -30,6 +51,8 @@ import type { RouteRecordRaw } from "vue-router";
 import { SidebarColor, ThemeMode } from "@/enums/settings";
 import { useSettingsStore, useAppStore } from "@/stores";
 import { isExternal } from "@/utils/index";
+import { buildNavGroups } from "@/constants/navigation";
+import { translateRouteTitle } from "@/lang/utils";
 import LayoutSidebarItem from "./LayoutSidebarItem.vue";
 import variables from "@/styles/variables.module.scss";
 const props = defineProps({
@@ -57,6 +80,16 @@ const props = defineProps({
     type: Boolean,
     default: null,
   },
+  /**
+   * 按「六组一级导航」分组渲染（MVP-WEB-01-04）
+   *
+   * 分组由账号实际拿到的路由派生（`buildNavGroups`），无路由的分组不渲染；
+   * 关闭时保持原平铺行为（双列 / 顶部 / 混合布局的二级列沿用）。
+   */
+  grouped: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const menuRef = ref<MenuInstance>();
@@ -65,6 +98,17 @@ const appStore = useAppStore();
 const currentRoute = useRoute();
 
 const expandedMenuIndexes = ref<string[]>([]);
+
+/** 折叠态（图标态）：显式覆盖 > 强制展开 > 全局侧栏状态 */
+const isCollapsed = computed(
+  () => props.collapseOverride ?? (props.alwaysExpand ? false : !appStore.sidebar.opened)
+);
+
+/** 六组导航分组（按账号实际拿到的路由派生，空分组不产出） */
+const navGroups = computed(() => buildNavGroups(props.data));
+
+/** 是否启用分组渲染：显式开启且确有可渲染分组 */
+const useGroupedMenu = computed(() => props.grouped && navGroups.value.length > 0);
 
 const theme = computed(() => settingsStore.resolvedTheme);
 
@@ -226,3 +270,30 @@ onMounted(() => {
   syncActiveParentMenus();
 });
 </script>
+
+<style lang="scss" scoped>
+/* ── 六组一级导航分组标题（MVP-WEB-01-04） ── */
+.layout-sidebar__group-title {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--el-text-color-secondary);
+  letter-spacing: 0.04em;
+}
+
+:deep(.el-menu-item-group__title) {
+  padding: 14px 12px 6px;
+  line-height: 1.4;
+}
+
+/* 折叠为图标态时隐藏分组标题，避免与图标挤压 */
+.layout-sidebar__menu.is-collapsed :deep(.el-menu-item-group__title) {
+  display: none;
+}
+
+/* 相邻分组之间留白，形成六组的视觉层次 */
+:deep(.el-menu-item-group + .el-menu-item-group) {
+  margin-top: 2px;
+}
+</style>

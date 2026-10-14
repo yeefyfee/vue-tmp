@@ -1,0 +1,17 @@
+{
+  "name": "@peluvida/api-contract",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PeluVida OS 的 REST API 契约（OpenAPI 3.1，契约先行）：统一响应信封、分页信封、错误码、通用请求头",
+  "license": "UNLICENSED",
+  "main": "./openapi.yaml",
+  "files": [
+    "openapi.yaml",
+    "scripts"
+  ],
+  "scripts": {
+    "validate": "node scripts/validate.mjs",
+    "check:impl": "node scripts/check-impl-sync.mjs",
+    "mock": "node scripts/mock-server.mjs"
+  }
+}

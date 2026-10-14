@@ -1,0 +1,600 @@
+# PeluVida OS —— REST API 契约（OpenAPI 3.1）
+#
+# 契约先行：本文件是三端（Web / 员工端 / 宠主端）与后端共同遵守的唯一接口基线。
+# 工作流（见 CROSS-15）：改契约 → CI 校验 → 生成 Mock / 类型 → 再写实现。
+#
+# 关键口径（决策 A4 / Q5 / Q6 / Q7，全文以此为准）：
+#   1. 端点前缀统一 /api/v1（Q7）
+#   2. 外层响应沿用 code / msg / data（A4：保持存量前端零回归）
+#   3. 列表信封统一 list / total / page / page_size（Q5，纯增量补 page 与 page_size）
+#   4. 金额一律为「分」整数（Q6），字段描述统一标注「金额（分）」
+#   5. 错误码格式「域_对象_原因」，如 BOOKING_SLOT_CONFLICT
+#
+# ⚠️ 本文件为 Phase -1 落地的契约骨架：统一结构与代表性端点已就位，
+#    各业务域的完整端点随 Phase 0 / MVP 各模块任务逐步补齐。
+
+openapi: 3.1.0
+
+info:
+  title: PeluVida OS API
+  version: 0.1.0
+  description: |
+    宠物门店数字化经营操作系统 API。
+    以「宠物」为核心数据对象、「服务」为业务流、「门店」为经营载体、「宠主」为用户入口。
+
+    统一约定：
+    - 认证：`Authorization: Bearer <access_token>`（JWT 双 Token，access 2h / refresh 30 天滑动续期）
+    - 多租户：`tenant_id` 一律由令牌解析，**客户端不得通过参数传递**；门店上下文用 `X-Store-Id`
+    - 幂等：POST / 支付类接口必须携带 `Idempotency-Key`
+    - 时间：ISO 8601 带时区
+    - 金额：**整数「分」**
+  contact:
+    name: PeluVida Engineering
+
+servers:
+  - url: http://localhost:8000/api/v1
+    description: 本地开发
+  - url: https://api.thepeluvida.example/api/v1
+    description: 生产（占位，待部署域名确定后更新）
+
+tags:
+  - name: Auth
+    description: 登录、刷新、登出、当前用户与上下文切换
+  - name: Tenant
+    description: 租户与套餐能力
+  - name: Store
+    description: 门店、房间资源、营业时间与门店配置
+  - name: Customer
+    description: 宠主档案、触达渠道、黑名单、客户分层
+  - name: Pet
+    description: 宠物档案、健康档案、体重曲线、行为标签、Pet Timeline
+  - name: Booking
+    description: 预约创建、容量校验、改期、取消、看板
+  - name: Order
+    description: 订单、明细、优惠分摊、支付与退款
+  - name: Boarding
+    description: 房态、入住登记、寄养中的每日照护与状态卡、退房
+  - name: Care
+    description: 照护任务生成、打卡、异常上报
+  - name: Payment
+    description: 支付、回调、对账、储值、套餐核销
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: 账号密码登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  description: 用户名（手机号或账号）
+                password:
+                  type: string
+                  format: password
+      responses:
+        "200":
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: 刷新访问令牌（滑动续期 + 旋转，重放则吊销全会话）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        "200":
+          description: 刷新成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/TokenPair"
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: 当前登录用户与权限上下文
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CurrentUser"
+
+  /pets:
+    get:
+      tags: [Pet]
+      summary: 宠物列表（分页）
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/StoreId"
+        - name: keyword
+          in: query
+          schema:
+            type: string
+          description: 宠物名 / 宠主手机号模糊搜索
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/PageResult"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/PetSummary"
+    post:
+      tags: [Pet]
+      summary: 新建宠物档案
+      parameters:
+        - $ref: "#/components/parameters/StoreId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /pets/{petId}/timeline:
+    get:
+      tags: [Pet]
+      summary: 宠物数字档案时间线（Pet Timeline，不可改删，纠错用冲正事件）
+      parameters:
+        - $ref: "#/components/parameters/PetId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/PageResult"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/TimelineEvent"
+
+  /audit-logs:
+    get:
+      tags: [Audit]
+      summary: 审计日志分页列表（租户内；对象/操作人/动作/时间区间筛选）
+      description: |
+        租户内审计查询（P0-02-08 子任务 4）：租户锚点只来自令牌（不可传参），
+        无租户上下文（平台 admin）一律 403 + A0302。
+        平台侧查询通道（tenant_id=0 哨兵行）待开放问题 6 拍板后另行实现。
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: entityType
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 审计对象类型（业务表名 slug，如 store / room）
+        - name: entityId
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 64
+          description: 审计对象 ID（精确匹配）
+        - name: operatorId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+          description: 操作人 ID（sys_user.id，纯数字字符串）
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: 审计动作（1 新增 / 2 修改 / 3 删除 / 4 启用 / 5 停用 / 6 导出 / 7 授权）
+        - name: startDate
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 起始时间（含边界；ISO 8601 / yyyy-MM-dd [HH:mm[:ss]]）
+        - name: endDate
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 截止时间（含当天末尾 23:59:59.999）
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/PageResult"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/AuditLogEntry"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: access token（JWT）；refresh token 走单独的刷新接口
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: 页码，从 1 开始
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: 每页条数，默认 20、上限 100
+    StoreId:
+      name: X-Store-Id
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: 门店上下文；多门店租户的接口按数据范围校验
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 64
+      description: 幂等键；POST 与支付类接口必填
+    Client:
+      name: X-Client
+      in: header
+      required: false
+      schema:
+        type: string
+        enum: [web, staff, owner, open-api]
+      description: 调用端标识
+    PetId:
+      name: petId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: 参数或业务校验失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ApiResponse:
+      type: object
+      required: [code, msg]
+      properties:
+        code:
+          type: string
+          description: 业务码；"00000" 表示成功
+          example: "00000"
+        msg:
+          type: string
+          description: 提示文案（沿用存量外层字段名 msg，见决策 A4）
+          example: 成功
+        data:
+          description: 业务数据；无返回值时为 null
+          nullable: true
+
+    PageResult:
+      type: object
+      required: [list, total, page, page_size]
+      properties:
+        list:
+          type: array
+          items: {}
+          description: 当前页数据
+        total:
+          type: integer
+          minimum: 0
+          description: 总条数
+        page:
+          type: integer
+          minimum: 1
+          description: 当前页码
+          example: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: 每页条数
+          example: 20
+
+    ErrorResponse:
+      type: object
+      required: [code, msg]
+      properties:
+        code:
+          type: string
+          description: 错误码，格式「域_对象_原因」
+          example: BOOKING_SLOT_CONFLICT
+        msg:
+          type: string
+          description: 面向用户的中文提示
+          example: 该时段容量已满
+        details:
+          type: array
+          nullable: true
+          description: 字段级错误明细（可选）
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+    TokenPair:
+      type: object
+      required: [accessToken, refreshToken]
+      properties:
+        accessToken:
+          type: string
+          description: 访问令牌，有效期 2 小时
+        refreshToken:
+          type: string
+          description: 刷新令牌，30 天滑动续期
+        expiresIn:
+          type: integer
+          description: access token 剩余有效期（秒）
+
+    CurrentUser:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        nickname:
+          type: string
+        tenantId:
+          type: string
+          format: uuid
+          description: 由令牌解析，客户端不可传参指定
+        storeIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: 可访问门店
+        roles:
+          type: array
+          items:
+            type: string
+          description: 角色码，见 shared 的 SystemRoleCode
+        permissions:
+          type: array
+          items:
+            type: string
+          description: 权限码 `module:resource:action`
+        dataScope:
+          type: string
+          enum: [all, store, self]
+          description: 数据范围
+
+    PetSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: 宠物名
+        species:
+          type: string
+          enum: [dog, cat, other]
+        breed:
+          type: string
+          description: 品种
+        gender:
+          type: string
+          enum: [male, female, unknown]
+        birthday:
+          type: string
+          format: date
+        weightGram:
+          type: integer
+          description: 体重（克）
+        avatarMediaId:
+          type: string
+          format: uuid
+          nullable: true
+        profileCompleteness:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: 档案完整度评分
+        customerId:
+          type: string
+          format: uuid
+          description: 归属宠主
+
+    TimelineEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        petId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          description: 事件类型（如 booking.confirmed / stay.checked_in / care.done）
+        occurredAt:
+          type: string
+          format: date-time
+        operatorId:
+          type: string
+          format: uuid
+          nullable: true
+        visibleToOwner:
+          type: boolean
+          description: 是否对宠主可见
+        payload:
+          type: object
+          additionalProperties: true
+
+    # 金额字段统一类型：整数「分」（决策 Q6）
+    AmountCents:
+      type: integer
+      format: int64
+      description: 金额（分）
+      example: 123456
+
+    AuditLogEntry:
+      type: object
+      required: [id, tenantId, entityType, entityId, action, operatorType, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 审计行 id（复合主键 (id, created_at) 之一）
+        tenantId:
+          type: string
+          description: 数据租户归属（BigInt 字符串形态；平台级对象为哨兵 "0"，租户内查询不可见）
+        storeId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 门店 id（X-Store-Id 锚点；平台级操作 NULL）
+        entityType:
+          type: string
+          description: 审计对象类型（业务表名 slug）
+        entityId:
+          type: string
+          description: 审计对象 ID（业务表主键字符串形态）
+        action:
+          type: integer
+          description: 动作（1 新增 / 2 修改 / 3 删除 / 4 启用 / 5 停用 / 6 导出 / 7 授权）
+        before:
+          nullable: true
+          description: 变更前快照（仅变更字段，已脱敏；create 为 null）
+        after:
+          nullable: true
+          description: 变更后快照（仅变更字段，已脱敏；delete 为 null）
+        operatorId:
+          type: string
+          nullable: true
+          description: 操作人（sys_user.id 字符串形态；NULL = 系统动作）
+        operatorType:
+          type: integer
+          description: 操作人类型（1 用户 / 0 系统）
+        operatorName:
+          type: string
+          nullable: true
+          description: 操作人姓名快照（冗余存储）
+        ip:
+          type: string
+          nullable: true
+          description: 客户端 IP
+        traceId:
+          type: string
+          nullable: true
+          description: CROSS-14 结构化日志追踪 ID
+        idempotencyKey:
+          type: string
+          nullable: true
+          description: 幂等键（A4）
+        createdAt:
+          type: string
+          format: date-time
+          description: 记录时间（分区键）

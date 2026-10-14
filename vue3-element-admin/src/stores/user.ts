@@ -9,6 +9,7 @@ import { AuthStorage } from "@/utils/auth";
 import { usePermissionStoreHook } from "@/stores/permission";
 import { useDictStoreHook } from "@/stores/dict";
 import { useTagsViewStore } from "@/stores";
+import { useStoreContextStoreHook } from "@/stores/store-context";
 import { cleanupSseServices } from "@/composables";
 
 export const useUserStore = defineStore("user", () => {
@@ -24,14 +25,6 @@ export const useUserStore = defineStore("user", () => {
     const { accessToken, refreshToken } = await AuthAPI.login(loginRequest);
     rememberMe.value = loginRequest.rememberMe ?? false;
     AuthStorage.setTokens(accessToken, refreshToken, rememberMe.value);
-  }
-
-  /**
-   * 扫码登录：用票据换取会话令牌
-   */
-  async function loginByQrCode(ticket: string): Promise<void> {
-    const { accessToken, refreshToken } = await AuthAPI.qrLogin(ticket);
-    AuthStorage.setTokens(accessToken, refreshToken, false);
   }
 
   let refreshPromise: Promise<void> | null = null;
@@ -65,10 +58,25 @@ export const useUserStore = defineStore("user", () => {
 
   /**
    * 登出
+   *
+   * 无论登出接口是否成功，都必须清空本地会话状态：
+   * 否则接口异常时本地 token 会残留，界面看似仍处于登录态。
+   *
+   * 同时吞掉接口异常、让 Promise 正常 resolve，保证调用方
+   * （如 LayoutToolbar 的 `.then(() => router.push('/login?...'))`）
+   * 在登出接口失败时仍能跳转登录页（验收 #7）。
    */
   async function logout(): Promise<void> {
-    await AuthAPI.logout();
-    resetAllState();
+    try {
+      await AuthAPI.logout();
+    } catch {
+      // 登出接口失败（网络异常 / 服务端错误 / token 已失效）不应阻断登出流程：
+      // 1) 错误提示已由 request.ts 响应拦截器统一处理，此处无需重复提示；
+      // 2) 下方 finally 保证本地会话状态一定被清空；
+      // 3) 吞掉异常使 Promise 正常 resolve，调用方的后续「跳转登录页」才会执行。
+    } finally {
+      resetAllState();
+    }
   }
 
   /**
@@ -83,7 +91,8 @@ export const useUserStore = defineStore("user", () => {
     // 2. 重置其他模块状态
     usePermissionStoreHook().resetRouter();
     useDictStoreHook().clearDictCache();
-    useTagsViewStore().delAllViews();
+    useTagsViewStore().resetWorkspace();
+    useStoreContextStoreHook().reset();
 
     // 3. 清理 SSE 连接
     cleanupSseServices();
@@ -119,7 +128,6 @@ export const useUserStore = defineStore("user", () => {
     rememberMe,
     isLoggedIn: () => !!AuthStorage.getAccessToken(),
     login,
-    loginByQrCode,
     logout,
     getUserInfo,
     resetAllState,

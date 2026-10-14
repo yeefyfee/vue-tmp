@@ -1,5 +1,7 @@
 # compiled output
-/dist
+# 含沙箱内构建前「改名为旧 dist 让路」产生的所有备份（dist.bak.* / dist_boot_bak_* /
+# dist_stale_bak_* 等，无法直接删除，见 PEL-10 记录），统一兜底忽略
+/dist*
 /node_modules
 
 # Logs

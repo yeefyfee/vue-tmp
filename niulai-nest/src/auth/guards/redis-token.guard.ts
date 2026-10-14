@@ -23,7 +23,11 @@ export class RedisTokenAuthGuard implements CanActivate {
     }
 
     const accessToken = authHeader.substring("Bearer ".length);
-    const userSession = await this.redisCacheService.get<any>(`auth:token:access:${accessToken}`);
+    // 全局键：本守卫在 DataScopeGuard **之前**执行（ALS 无租户上下文），
+    // 必须与签发端（setGlobal）同口径，否则会话映射恒 miss、全部请求 A0230。
+    const userSession = await this.redisCacheService.getGlobal<any>(
+      `auth:token:access:${accessToken}`
+    );
 
     if (!userSession) {
       throw new BusinessException(ErrorCode.ACCESS_TOKEN_INVALID);

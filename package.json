@@ -1,0 +1,42 @@
+{
+  "name": "peluvida-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PeluVida OS —— 宠物门店数字化经营操作系统（monorepo 根。产品名 PeluVida OS，代码标识 peluvida，Pet OS 仅作文档别名）",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/build-shared.mjs",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run type-check",
+    "shared:build": "pnpm --filter @peluvida/shared build",
+    "shared:test": "pnpm --filter @peluvida/shared test",
+    "admin:dev": "pnpm shared:build && pnpm --filter vue3-element-admin dev",
+    "admin:build": "pnpm shared:build && pnpm --filter vue3-element-admin build",
+    "api:dev": "pnpm shared:build && pnpm --filter niulai-nest start:dev",
+    "api:build": "pnpm shared:build && pnpm --filter niulai-nest build",
+    "api:test": "pnpm shared:build && pnpm --filter niulai-nest test",
+    "type-check": "pnpm shared:build && pnpm -r --parallel type-check",
+    "contract:validate": "node packages/api-contract/scripts/validate.mjs",
+    "lint:root": "eslint scripts/**/*.mjs eslint.config.mjs",
+    "prepare": "husky",
+    "commit": "cz-git"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.8",
+    "eslint": "^9.39.2",
+    "@eslint/js": "^9.39.2",
+    "globals": "^16.5.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.8",
+    "@commitlint/cli": "^20.5.3",
+    "@commitlint/config-conventional": "^20.5.3",
+    "cz-git": "^1.13.1",
+    "prettier": "^3.7.4"
+  },
+  "packageManager": "pnpm@11.17.0"
+}

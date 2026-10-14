@@ -5,14 +5,102 @@
 - **前端** `vue3-element-admin` — Vue 3 + Vite + TypeScript + Element Plus
 - **后端** `niulai-nest` — NestJS 11 + TypeORM + MySQL + Redis + JWT
 
+> ⚠️ 本仓库正在进行 **PeluVida OS**（宠物门店数字化经营系统）改造，当前处于 **Phase -1 基座改造**阶段。
+> 任务清单见 [`PeluVida-OS-dev-todo.md`](./PeluVida-OS-dev-todo.md)，决策记录见 [`PeluVida-OS-decisions.md`](./PeluVida-OS-decisions.md)。
+
+---
+
+## PeluVida OS 改造说明（Phase -1 进行中）
+
+本仓库已升级为 **逻辑 monorepo**（`pnpm-workspace.yaml` + `packages/*`）。
+
+```text
+vue3-template/
+├─ packages/
+│  ├─ shared/          # @peluvida/shared —— 三端唯一常量来源
+│  │                   #   状态机枚举与状态映射（文案 / 语义色）、金额 Money、
+│  │                   #   分页契约、设计令牌、RBAC 权限码
+│  └─ api-contract/    # @peluvida/api-contract —— OpenAPI 3.1 契约 + 结构校验
+├─ vue3-element-admin/ # 前端（待更名为 peluvida-admin）
+├─ niulai-nest/        # 后端（待更名为 peluvida-nest）
+└─ scripts/
+   └─ build-shared.mjs # postinstall 自动构建共享包
+```
+
+### 🔴 共享包的引用方式是「不对称」的（刻意如此，但必须知道）
+
+| 端   | 解析路径                                                               | 实际消费     | 影响                                       |
+| ---- | ---------------------------------------------------------------------- | ------------ | ------------------------------------------ |
+| 前端 | `vite.config.ts` alias + `tsconfig.json` paths → `packages/shared/src` | **源码**     | 改完 shared 立即 HMR 生效                  |
+| 后端 | `node_modules/@peluvida/shared` → `packages/shared/dist`               | **构建产物** | **改完 shared 必须重新构建**，否则读到旧值 |
+
+因此：**任何改动 `packages/shared/src` 之后，都要重新构建一次**。
+
+```bash
+pnpm shared:build     # 手动构建；pnpm install 时 postinstall 也会自动构建
+pnpm shared:test      # 共享包单测
+pnpm contract:validate # API 契约结构校验
+```
+
+根脚本已内置共享包构建前置，日常直接用这些即可：
+
+```bash
+pnpm api:dev      # 构建 shared → 启动后端
+pnpm api:build    # 构建 shared → 构建后端
+pnpm admin:dev    # 构建 shared → 启动前端
+```
+
+> **为什么后端不直接引源码？** NestJS 以 CommonJS + `tsc` 编译，
+> 一旦引入 `src` 之外的 TS 源码，`tsc` 会把 `rootDir` 推断到上层公共目录，
+> 产物结构将变成 `dist/niulai-nest/src/main.js`，`node dist/main` 直接失效。
+> 消费构建产物是唯一不破坏 `dist` 结构的方式。
+
+### 共享包的内容边界
+
+新增「状态 / 枚举 / 金额 / 分页 / 语义色 / 权限码」时**一律加到 `packages/shared`**，
+禁止在页面或 service 内私写状态映射表、`toFixed` 金额换算或状态色值 —— 那是三端口径漂移的源头。
+
+金额全链路统一为**整数「分」**，展示层统一走 `formatCents()`。
+
+### 数据库：PostgreSQL 16 + Prisma（PEL-10）
+
+> A1 决策：**弃 MySQL + TypeORM**，迁 **PostgreSQL 16 + Prisma**。
+> 当前已完成「Prisma 接入 + schema 基线迁移」，服务层仍暂走 TypeORM，**逐模块切换中**。
+
+后端 `niulai-nest`：
+
+```bash
+# 1) 准备一个 PG 16 实例，并建库（开发库名 peluvida_dev）
+# 2) 配置 niulai-nest/.env.dev 的 PG_HOST / PG_PORT / PG_USER / PG_PASSWORD / PG_DB / DATABASE_URL
+# 3) 生成客户端并同步表结构
+pnpm prisma:generate        # 生成 Prisma Client
+pnpm prisma:migrate         # 开发期：生成并应用迁移
+pnpm prisma:deploy          # 生产期：只应用已有迁移
+pnpm prisma:studio          # 可视化查看数据
+```
+
+⚠️ **三个必须知道的点**：
+
+1. **Prisma 7 的破坏性变更** —— 连接串**不能**写在 `schema.prisma` 里，
+   统一放在工程根 `prisma.config.ts` 的 `datasource.url`；客户端**必须**传 driver adapter
+   （本项目用 `@prisma/adapter-pg`）。照抄 Prisma 6 的写法会被 `prisma validate` 直接拒掉。
+2. **`prisma.config.ts` 已从 `tsconfig.build.json` 排除** —— 否则 `tsc` 的 `rootDir` 会被推断到工程根，
+   产物变成 `dist/src/main.js`，`node dist/main`（`start:prod` 与 Docker CMD）全部失效。
+   **不要**把它加回构建范围。
+3. **`DATABASE_URL` 与 `PG_*` 必须指向同一个库** —— `prisma.config.ts` 自带 env 加载器，
+   加载顺序与 Nest 的 `ConfigModule` 一致（`.env` → `.env.${NODE_ENV}`），避免「CLI 连 A 库、应用连 B 库」。
+
+`prisma/schema.prisma` 当前覆盖 14 张表（`sys_*` 12 + `gen_*` 2），
+**只做字段级 1:1 平移、不建外键**（原 MySQL 库同样没有外键），全量域建模见 `CROSS-08`。
+
 ---
 
 ## 一、项目组成
 
-| 目录 | 角色 | 技术栈 | 默认端口 |
-| --- | --- | --- | --- |
-| `vue3-element-admin/` | 前端 | Vue 3 / Vite 5 / TypeScript / Element Plus / Pinia / UnoCSS | `3000` |
-| `niulai-nest/` | 后端 | NestJS 11 / TypeORM / MySQL 8 / Redis 7 / JWT | `8000` |
+| 目录                  | 角色 | 技术栈                                                      | 默认端口 |
+| --------------------- | ---- | ----------------------------------------------------------- | -------- |
+| `vue3-element-admin/` | 前端 | Vue 3 / Vite 5 / TypeScript / Element Plus / Pinia / UnoCSS | `3000`   |
+| `niulai-nest/`        | 后端 | NestJS 11 / TypeORM / MySQL 8 / Redis 7 / JWT               | `8000`   |
 
 ### 目录结构
 
@@ -46,13 +134,13 @@ vue3-template/
 
 ## 二、环境要求
 
-| 依赖 | 版本要求 | 说明 |
-| --- | --- | --- |
-| Node.js | 前端 `^20.19.0 \|\| >=22.12.0`；后端 `>=20.17.0` | 建议统一使用 20 LTS 或 22+ |
-| pnpm | `>=8.0.0` | **两个项目都强制使用 pnpm**，前端 `preinstall` 有 `only-allow pnpm` 校验 |
-| MySQL | 5.7+ / 8.x | 必需 |
-| Redis | 7.x | 必需，用于验证码、会话、缓存 |
-| MinIO | 可选 | 仅在使用 `OSS_TYPE=minio` 时需要 |
+| 依赖    | 版本要求                                         | 说明                                                                     |
+| ------- | ------------------------------------------------ | ------------------------------------------------------------------------ |
+| Node.js | 前端 `^20.19.0 \|\| >=22.12.0`；后端 `>=20.17.0` | 建议统一使用 20 LTS 或 22+                                               |
+| pnpm    | `>=8.0.0`                                        | **两个项目都强制使用 pnpm**，前端 `preinstall` 有 `only-allow pnpm` 校验 |
+| MySQL   | 5.7+ / 8.x                                       | 必需                                                                     |
+| Redis   | 7.x                                              | 必需，用于验证码、会话、缓存                                             |
+| MinIO   | 可选                                             | 仅在使用 `OSS_TYPE=minio` 时需要                                         |
 
 ---
 
@@ -69,11 +157,11 @@ docker compose up -d
 
 会拉起三个容器：
 
-| 服务 | 容器名 | 端口 | 账号 |
-| --- | --- | --- | --- |
-| MySQL 8.0 | `niulai-nest-mysql` | `3306` | `root` / `root123` |
-| Redis 7.2 | `niulai-nest-redis` | `6379` | 密码 `123456` |
-| MinIO | `niulai-nest-minio` | `9000`（API）/ `9001`（控制台） | `minioadmin` / `minioadmin` |
+| 服务      | 容器名              | 端口                            | 账号                        |
+| --------- | ------------------- | ------------------------------- | --------------------------- |
+| MySQL 8.0 | `niulai-nest-mysql` | `3306`                          | `root` / `root123`          |
+| Redis 7.2 | `niulai-nest-redis` | `6379`                          | 密码 `123456`               |
+| MinIO     | `niulai-nest-minio` | `9000`（API）/ `9001`（控制台） | `minioadmin` / `minioadmin` |
 
 > MySQL 首次启动时会自动执行 `sql/mysql/niulai_admin.sql` 完成建库建表（仅当数据目录为空时执行）。
 > 若需重新导入，先清空 `docker/mysql/data` 目录。
@@ -138,8 +226,8 @@ pnpm dev
 
 ### 3. 默认登录账号
 
-| 用户名 | 密码 |
-| --- | --- |
+| 用户名  | 密码     |
+| ------- | -------- |
 | `admin` | `123456` |
 
 ---
@@ -156,11 +244,11 @@ pnpm dev
 
 对应配置在 `vue3-element-admin/vite.config.ts` 的 `server.proxy`：
 
-| 项 | 值 |
-| --- | --- |
-| 代理前缀 | `VITE_APP_BASE_API` = `/prod-api` |
+| 项       | 值                                                |
+| -------- | ------------------------------------------------- |
+| 代理前缀 | `VITE_APP_BASE_API` = `/prod-api`                 |
 | 代理目标 | `VITE_APP_API_URL` = `https://api.theobuild.top/` |
-| rewrite | 去掉开头的 `/prod-api` |
+| rewrite  | 去掉开头的 `/prod-api`                            |
 
 > ⚠️ 该代理**只在 `pnpm dev` 时生效**，`pnpm build` 后产物里不含代理逻辑。
 > 生产环境需由 Nginx 承担同样的转发职责，详见 [七、生产部署](#七生产部署)。
@@ -170,15 +258,15 @@ pnpm dev
 
 ### 接口契约
 
-| 项 | 约定 |
-| --- | --- |
-| 成功码 | `code === "00000"` |
-| 响应结构 | `{ code, msg, data }` |
-| 分页结构 | `{ list, total }` |
-| 鉴权头 | `Authorization: Bearer <accessToken>` |
-| Token 失效码 | `A0230` / `A0231` |
-| 权限不足码 | `A0301` |
-| 接口文档 | <http://localhost:8000/api/v1/api-docs> |
+| 项           | 约定                                    |
+| ------------ | --------------------------------------- |
+| 成功码       | `code === "00000"`                      |
+| 响应结构     | `{ code, msg, data }`                   |
+| 分页结构     | `{ list, total }`                       |
+| 鉴权头       | `Authorization: Bearer <accessToken>`   |
+| Token 失效码 | `A0230` / `A0231`                       |
+| 权限不足码   | `A0301`                                 |
+| 接口文档     | <http://localhost:8000/api/v1/api-docs> |
 
 ---
 
@@ -186,19 +274,19 @@ pnpm dev
 
 ### 后端 `niulai-nest/.env.dev`
 
-| 变量 | 说明 | 当前值 |
-| --- | --- | --- |
-| `NODE_ENV` | 运行环境，决定加载 `.env.${NODE_ENV}` | `dev` |
-| `APP_PORT` | 服务监听端口 | `8000` |
-| `SESSION_TYPE` | 会话模式：`jwt` / `redis-token` | `jwt` |
-| `MYSQL_HOST` / `MYSQL_PORT` | MySQL 地址 | `localhost` / `3306` |
-| `MYSQL_USER` / `MYSQL_PASSWORD` | MySQL 账号 | `root` / `root123` |
-| `MYSQL_DB` | 数据库名（须与实际库一致） | `nest_db` |
-| `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | Redis 地址与库号 | `localhost` / `6379` / `7` |
-| `REDIS_PASSWORD` | Redis 密码，无密码留空 | 空 |
-| `JWT_SECRET_KEY` | JWT 密钥（HS256 至少 32 字符） | 见文件 |
-| `JWT_EXPIRES_IN` | Access Token 有效期（秒） | `7200` |
-| `OSS_TYPE` | 存储方式：`aliyun` / `minio` / `local` | `minio` |
+| 变量                                     | 说明                                   | 当前值                     |
+| ---------------------------------------- | -------------------------------------- | -------------------------- |
+| `NODE_ENV`                               | 运行环境，决定加载 `.env.${NODE_ENV}`  | `dev`                      |
+| `APP_PORT`                               | 服务监听端口                           | `8000`                     |
+| `SESSION_TYPE`                           | 会话模式：`jwt` / `redis-token`        | `jwt`                      |
+| `MYSQL_HOST` / `MYSQL_PORT`              | MySQL 地址                             | `localhost` / `3306`       |
+| `MYSQL_USER` / `MYSQL_PASSWORD`          | MySQL 账号                             | `root` / `root123`         |
+| `MYSQL_DB`                               | 数据库名（须与实际库一致）             | `nest_db`                  |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | Redis 地址与库号                       | `localhost` / `6379` / `7` |
+| `REDIS_PASSWORD`                         | Redis 密码，无密码留空                 | 空                         |
+| `JWT_SECRET_KEY`                         | JWT 密钥（HS256 至少 32 字符）         | 见文件                     |
+| `JWT_EXPIRES_IN`                         | Access Token 有效期（秒）              | `7200`                     |
+| `OSS_TYPE`                               | 存储方式：`aliyun` / `minio` / `local` | `minio`                    |
 
 > **Redis 密码注意**：本机已有 redis 容器未设密码，故 `REDIS_PASSWORD` 留空；
 > 若改用 `docker/docker-compose.yml` 启动，其 Redis 使用 `--requirepass 123456`，需同步改为 `REDIS_PASSWORD=123456`。
@@ -207,13 +295,13 @@ pnpm dev
 
 两份文件当前配置相同：
 
-| 变量 | 说明 | 当前值 |
-| --- | --- | --- |
-| `VITE_APP_PORT` | 开发服务器端口（仅 dev 生效） | `3000` |
-| `VITE_APP_BASE_API` | 请求前缀，axios 的 `baseURL` 取自它 | `/prod-api` |
-| `VITE_APP_API_URL` | 代理目标，**仅 dev 代理使用** | `https://api.theobuild.top/` |
-| `VITE_MOCK_DEV_SERVER` | 是否启用 Mock | `false` |
-| `VITE_APP_TENANT_ENABLED` | 多租户开关 | `false` |
+| 变量                      | 说明                                | 当前值                       |
+| ------------------------- | ----------------------------------- | ---------------------------- |
+| `VITE_APP_PORT`           | 开发服务器端口（仅 dev 生效）       | `3000`                       |
+| `VITE_APP_BASE_API`       | 请求前缀，axios 的 `baseURL` 取自它 | `/prod-api`                  |
+| `VITE_APP_API_URL`        | 代理目标，**仅 dev 代理使用**       | `https://api.theobuild.top/` |
+| `VITE_MOCK_DEV_SERVER`    | 是否启用 Mock                       | `false`                      |
+| `VITE_APP_TENANT_ENABLED` | 多租户开关                          | `false`                      |
 
 > ⚠️ **`VITE_APP_API_URL` 对构建产物完全无效**。它在 `src/` 目录中零引用，只被 `vite.config.ts` 的 `server.proxy.target` 使用。
 > 构建后 axios 用的是 `VITE_APP_BASE_API`（相对路径 `/prod-api`），生产环境必须由 Nginx 转发，改 `VITE_APP_API_URL` 不会让接口指向后端。
@@ -243,6 +331,7 @@ pm2 save
 ```
 
 建议生产环境：
+
 - 修改 `.env.prod` 中的数据库地址、密码与 `JWT_SECRET_KEY`；
 - 设置 `TYPEORM_LOGGING=false`，避免 SQL 日志过大；
 - 用 Nginx 反向代理 8000 端口并配置 HTTPS。
@@ -251,12 +340,12 @@ pm2 save
 
 `niulai-nest/` 下提供了完整的容器化部署文件。**先判断数据库是否已经存在**，再选对应文件：
 
-| 文件 | 作用 | 适用场景 |
-| --- | --- | --- |
-| `Dockerfile` | 四阶段构建：装依赖 → `nest build` → 裁剪为生产依赖 → 运行镜像（`node dist/main.js`） | 通用 |
-| `.dockerignore` | 排除 `node_modules` / `dist` / `logs` / `.env.prod` 等，缩小构建上下文并避免密钥进镜像 | 通用 |
-| `docker-compose.prod.yml` | app + MySQL + Redis + MinIO 编排，含健康检查、数据卷、自动导入 SQL | **情形 A**：全新部署，服务器上没有任何数据库 |
-| `docker-compose.app-only.yml` | 仅 app，连接**外部已有**的 MySQL / Redis / MinIO，不建库、不导入 SQL | **情形 B/C**：数据库已存在（含业务数据 / 别的项目在用 / 云 RDS） |
+| 文件                          | 作用                                                                                   | 适用场景                                                         |
+| ----------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `Dockerfile`                  | 四阶段构建：装依赖 → `nest build` → 裁剪为生产依赖 → 运行镜像（`node dist/main.js`）   | 通用                                                             |
+| `.dockerignore`               | 排除 `node_modules` / `dist` / `logs` / `.env.prod` 等，缩小构建上下文并避免密钥进镜像 | 通用                                                             |
+| `docker-compose.prod.yml`     | app + MySQL + Redis + MinIO 编排，含健康检查、数据卷、自动导入 SQL                     | **情形 A**：全新部署，服务器上没有任何数据库                     |
+| `docker-compose.app-only.yml` | 仅 app，连接**外部已有**的 MySQL / Redis / MinIO，不建库、不导入 SQL                   | **情形 B/C**：数据库已存在（含业务数据 / 别的项目在用 / 云 RDS） |
 
 ```bash
 cd niulai-nest
@@ -323,12 +412,12 @@ export MYSQL_HOST=rm-xxxx.mysql.rds.aliyuncs.com
 
 启动前要核对四件事：
 
-| 核对项 | 说明 |
-| --- | --- |
-| **库与表已就绪** | `typeorm.config.ts` 里 `synchronize: false`，**不会自动建表**。查表数：`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='niulai_admin';` 应为 24 张 |
+| 核对项               | 说明                                                                                                                                                                                                                                                                                                            |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **库与表已就绪**     | `typeorm.config.ts` 里 `synchronize: false`，**不会自动建表**。查表数：`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='niulai_admin';` 应为 24 张                                                                                                                                           |
 | **账号允许远程连接** | 宿主机原生安装的 MySQL，`root` 通常是 `root@localhost` + `auth_socket`，**容器连不进去**，需单独建用户：`CREATE USER 'niulai'@'%' IDENTIFIED BY '强密码'; GRANT ALL PRIVILEGES ON niulai_admin.* TO 'niulai'@'%'; FLUSH PRIVILEGES;`（若数据库本身是官方 `mysql` 镜像起的，它已建好 `root@'%'`，可直接用 root） |
-| **Redis 密码一致** | 有密码就填 `REDIS_PASSWORD`，没密码留空 —— 与你在用的 Redis 实际配置对齐 |
-| **字符集为 utf8mb4** | 否则中文与 emoji 写入可能报错 |
+| **Redis 密码一致**   | 有密码就填 `REDIS_PASSWORD`，没密码留空 —— 与你在用的 Redis 实际配置对齐                                                                                                                                                                                                                                        |
+| **字符集为 utf8mb4** | 否则中文与 emoji 写入可能报错                                                                                                                                                                                                                                                                                   |
 
 另外两点容易踩的：
 
@@ -398,13 +487,13 @@ nginx -t && nginx -s reload
 
 配置里几个不能省的要点：
 
-| 要点 | 说明 |
-| --- | --- |
-| **剥掉 `/prod-api` 前缀** | 二选一：① `proxy_pass https://api.theobuild.top/;`（靠尾斜杠）② `rewrite ^/prod-api/(.*)$ /$1 break;` + `proxy_pass https://api.theobuild.top;`（显式改写，**不受面板回写影响，推荐**）。漏掉剥前缀会导致后端收到 `/prod-api/api/v1/...` 并返回 `404 C0113 接口不存在` |
-| `proxy_ssl_server_name on;` + `proxy_ssl_name` | 后端位于 Cloudflare 之后，反代 HTTPS 上游时**必须发 SNI**，否则 TLS 握手拿不到正确证书 |
-| `proxy_set_header Host api.theobuild.top;` | 必须指定，否则 Cloudflare 无法按域名路由到正确源站 |
-| `proxy_read_timeout 3600s;` + `proxy_buffering off;` | 兼容 SSE 长连接（`/api/v1/sse/connect`），否则会被 Nginx 60 秒默认超时掐断 |
-| `try_files $uri $uri/ /index.html;` | SPA 回退。本项目路由是 **hash 模式**（`createWebHashHistory`），真实地址形如 `/#/system/user`，服务器只会看到 `/`，所以**当前并非必需**；若将来改用 history 模式则必须加 |
+| 要点                                                 | 说明                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **剥掉 `/prod-api` 前缀**                            | 二选一：① `proxy_pass https://api.theobuild.top/;`（靠尾斜杠）② `rewrite ^/prod-api/(.*)$ /$1 break;` + `proxy_pass https://api.theobuild.top;`（显式改写，**不受面板回写影响，推荐**）。漏掉剥前缀会导致后端收到 `/prod-api/api/v1/...` 并返回 `404 C0113 接口不存在` |
+| `proxy_ssl_server_name on;` + `proxy_ssl_name`       | 后端位于 Cloudflare 之后，反代 HTTPS 上游时**必须发 SNI**，否则 TLS 握手拿不到正确证书                                                                                                                                                                                 |
+| `proxy_set_header Host api.theobuild.top;`           | 必须指定，否则 Cloudflare 无法按域名路由到正确源站                                                                                                                                                                                                                     |
+| `proxy_read_timeout 3600s;` + `proxy_buffering off;` | 兼容 SSE 长连接（`/api/v1/sse/connect`），否则会被 Nginx 60 秒默认超时掐断                                                                                                                                                                                             |
+| `try_files $uri $uri/ /index.html;`                  | SPA 回退。本项目路由是 **hash 模式**（`createWebHashHistory`），真实地址形如 `/#/system/user`，服务器只会看到 `/`，所以**当前并非必需**；若将来改用 history 模式则必须加                                                                                               |
 
 > **接口报 `C0113 接口不存在` 说明什么？** 那是**后端**发出的报文（响应带 `x-powered-by: Express`），
 > 意味着反代已经生效、请求到达了后端，只是路径里还带着 `/prod-api` —— 即**前缀没被剥掉**，
@@ -442,19 +531,19 @@ nginx -t && nginx -s reload
 
 ## 八、常用命令速查
 
-| 项目 | 命令 | 说明 |
-| --- | --- | --- |
-| 前端 | `pnpm dev` | 启动开发服务器 |
-| 前端 | `pnpm build` | 类型检查 + 生产构建 |
-| 前端 | `pnpm preview` | 预览构建产物 |
-| 后端 | `pnpm start:dev` | 开发模式（热重载） |
-| 后端 | `pnpm build` | 构建到 `dist/` |
-| 后端 | `pnpm start:prod` | 运行构建产物 |
-| 后端 | `pnpm test` / `pnpm test:e2e` | 单元测试 / 端到端测试 |
-| 后端 | `docker compose -f docker-compose.prod.yml up -d --build` | 生产一键部署（含 app） |
-| 后端 | `docker compose -f docker-compose.prod.yml logs -f app` | 跟踪应用日志 |
-| 后端 | `docker compose -f docker-compose.prod.yml down` | 停止（保留数据卷） |
-| 本地依赖 | `cd niulai-nest/docker && docker compose up -d` | 只起 MySQL / Redis / MinIO |
+| 项目     | 命令                                                      | 说明                       |
+| -------- | --------------------------------------------------------- | -------------------------- |
+| 前端     | `pnpm dev`                                                | 启动开发服务器             |
+| 前端     | `pnpm build`                                              | 类型检查 + 生产构建        |
+| 前端     | `pnpm preview`                                            | 预览构建产物               |
+| 后端     | `pnpm start:dev`                                          | 开发模式（热重载）         |
+| 后端     | `pnpm build`                                              | 构建到 `dist/`             |
+| 后端     | `pnpm start:prod`                                         | 运行构建产物               |
+| 后端     | `pnpm test` / `pnpm test:e2e`                             | 单元测试 / 端到端测试      |
+| 后端     | `docker compose -f docker-compose.prod.yml up -d --build` | 生产一键部署（含 app）     |
+| 后端     | `docker compose -f docker-compose.prod.yml logs -f app`   | 跟踪应用日志               |
+| 后端     | `docker compose -f docker-compose.prod.yml down`          | 停止（保留数据卷）         |
+| 本地依赖 | `cd niulai-nest/docker && docker compose up -d`           | 只起 MySQL / Redis / MinIO |
 
 ---
 

@@ -1,13 +1,16 @@
 import { reactive, ref, type Ref } from "vue";
 
-import type { BaseQueryParams, PageResult } from "@/api/common";
+import type { BaseQueryParams, PageQueryBase, PageResult } from "@/api/common";
 
 /**
  * 分页列表页通用状态管理
  *
  * 只管理请求、分页数据和查询参数，不处理勾选、弹窗、表单
+ *
+ * 泛型约束为 {@link PageQueryBase}：同时兼容新契约 `page` / `page_size`（snake_case）
+ * 与存量系统域 `pageNum` / `pageSize`（camelCase），回首页时按实际存在的字段重置。
  */
-export function usePageTable<T, Q extends BaseQueryParams = BaseQueryParams>(
+export function usePageTable<T, Q extends PageQueryBase = BaseQueryParams>(
   options: UsePageTableOptions<T, Q>
 ): UsePageTableReturn<T, Q> {
   const { initialParams, request, onBeforeReset } = options;
@@ -37,8 +40,15 @@ export function usePageTable<T, Q extends BaseQueryParams = BaseQueryParams>(
    * 回到第一页并查询
    */
   function handleQuery(): void {
-    params.pageNum = 1;
+    resetToFirstPage();
     fetchData();
+  }
+
+  /** 按实际存在的分页字段回落到第一页（兼容两套命名） */
+  function resetToFirstPage(): void {
+    const target = params as Q & PageQueryBase;
+    if ("page" in target) target.page = 1;
+    if ("pageNum" in target) target.pageNum = 1;
   }
 
   /**
@@ -71,7 +81,7 @@ export function usePageTable<T, Q extends BaseQueryParams = BaseQueryParams>(
   };
 }
 
-export interface UsePageTableOptions<T, Q extends BaseQueryParams> {
+export interface UsePageTableOptions<T, Q extends PageQueryBase> {
   /** 初始查询参数，同时作为重置基准 */
   initialParams: Q;
   /**
@@ -86,7 +96,7 @@ export interface UsePageTableOptions<T, Q extends BaseQueryParams> {
   onBeforeReset?: () => void;
 }
 
-export interface UsePageTableReturn<T, Q extends BaseQueryParams> {
+export interface UsePageTableReturn<T, Q extends PageQueryBase> {
   /** 加载状态 */
   loading: Ref<boolean>;
   /** 当前页数据列表 */

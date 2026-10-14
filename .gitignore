@@ -2,6 +2,10 @@
 /dist
 /node_modules
 
+# PeluVida OS 共享包（packages/*）的构建产物
+packages/*/dist
+packages/*/node_modules
+
 # Logs
 logs
 *.log
@@ -10,6 +14,9 @@ pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
+
+# husky（pnpm install 自动生成的内部目录）
+.husky/_
 
 # OS
 .DS_Store
@@ -41,3 +48,6 @@ lerna-debug.log*
 # Docker 数据目录
 docker/*/data
 docker/*/config
+
+# 临时验证产物（CDP 真机脚本 / 断言截图 / 飞书回写载荷 JSON）
+_tmp*

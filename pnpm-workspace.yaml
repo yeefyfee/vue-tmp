@@ -1,0 +1,22 @@
+# PeluVida OS —— 逻辑 monorepo（决策 A3 第 1 步）
+#
+# 本阶段只做「逻辑 monorepo」：两个工程原地不动，仅新增 packages/* 共享包，
+# 用 workspace 引用打通三端共享；物理迁移（apps/* + server/*）为 A3 第 2 步，见 CROSS-01。
+#
+# ⚠️ PEL-06（工程重命名）完成后，需同步把下面的 vue3-element-admin / niulai-nest
+#    改为 peluvida-admin / peluvida-nest。
+packages:
+  - "packages/*"
+  - "vue3-element-admin"
+  - "niulai-nest"
+# pnpm v10 构建脚本白名单（ERR_PNPM_IGNORED_BUILDS 批准清单）
+# true = 允许其 install 脚本执行；false = 跳过（纯遥测/无功能影响的包）
+allowBuilds:
+  "@alicloud/openapi-core": true # file 模块 OCR 依赖
+  "@parcel/watcher": true # nest start --watch 原生文件监听
+  "@prisma/engines": true # Prisma 引擎二进制下载（必须，缺失则 migrate/generate 不可用）
+  "@scarf/scarf": false # 纯匿名遥测，无功能影响
+  bcrypt: true # 原生 bcrypt 编译（必须，缺失则登录密码校验运行时报错）
+  es5-ext: false # postinstall 仅推广打印，无功能影响
+  msgpackr-extract: false # bullmq 可选原生加速件：本机 node-gyp 链异常（electron abi 误判），纯 JS 回退功能无损；容器内亦跳过，镜像内已含编译版不受影响
+  prisma: true # Prisma CLI 安装脚本（必须）

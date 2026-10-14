@@ -2,14 +2,20 @@
  * SCSS 变量定义
  */
 
-// 布局尺寸
-$sidebar-width: 210px;
-$sidebar-width-collapsed: 54px;
+// 布局尺寸（01-03 三段式：《页面信息架构》左导航 240/64 + 顶部上下文栏 56 + 工作区 1440 居中）
+$sidebar-width: 240px;
+$sidebar-width-collapsed: 64px;
 $sidebar-primary-width: 76px;
 $sidebar-secondary-width: 210px;
-$navbar-height: 48px;
+$navbar-height: 56px;
 $tags-view-height: 38px;
 $sidebar-toggle-height: 50px;
+$workspace-max-width: 1440px;
+
+// 响应式断点（《Web 规范·响应式断点》）
+$breakpoint-xl: 1280px; // ≥1280 完整布局
+$breakpoint-lg: 1024px; // 1024~1279 左导航折叠为图标
+$breakpoint-md: 768px; // 768~1023 桌面窄屏；<768 移动端
 
 // 菜单配色（映射 theme.scss 的 CSS 变量）
 $menu-background: var(--menu-background);

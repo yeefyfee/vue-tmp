@@ -66,7 +66,15 @@ export default [
       "no-unused-vars": "off",
       "no-undef": "off",
       "no-redeclare": "off",
-      "@typescript-eslint/ban-ts-comment": "off",
+      // CROSS-02 类型红线：禁 @ts-ignore（@ts-expect-error 需带 ≥8 字符说明）
+      "@typescript-eslint/ban-ts-comment": [
+        "error",
+        {
+          "ts-expect-error": "allow-with-description",
+          "ts-ignore": true,
+          minimumDescriptionLength: 8,
+        },
+      ],
     },
   },
 
@@ -111,7 +119,8 @@ export default [
         },
       ],
       "vue/component-name-in-template-casing": ["error", "PascalCase"],
-      "@typescript-eslint/no-explicit-any": "warn",
+      // CROSS-02 类型红线：vue SFC 同样禁显式 any
+      "@typescript-eslint/no-explicit-any": "error",
     },
   },
 
@@ -127,10 +136,18 @@ export default [
       },
     },
     rules: {
-      "@typescript-eslint/no-explicit-any": "warn",
+      // CROSS-02 类型红线：禁显式 any 与 @ts-ignore（@ts-expect-error 需带说明）
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/ban-ts-comment": [
+        "error",
+        {
+          "ts-expect-error": "allow-with-description",
+          "ts-ignore": true,
+          minimumDescriptionLength: 8,
+        },
+      ],
       "@typescript-eslint/no-empty-function": "off",
       "@typescript-eslint/no-empty-object-type": "off",
-      "@typescript-eslint/ban-ts-comment": "off",
       "@typescript-eslint/no-non-null-assertion": "off",
       "@typescript-eslint/no-unused-vars": [
         "warn",
@@ -165,6 +182,27 @@ export default [
     rules: {
       "no-unused-vars": "off",
       "@typescript-eslint/no-unused-vars": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      // CURD 为上游模板代码生成区，存量 @ts-ignore 集中于此（PageModal/PageSearch）
+      "@typescript-eslint/ban-ts-comment": "off",
+    },
+  },
+
+  // CROSS-02 存量豁免清单：以下 8 个文件含历史 explicit-any（共 23 处，上游 vue3-element-admin 存量），
+  // 重构触及对应文件时逐个摘除；不在清单内的文件立即受 no-explicit-any=error 约束。
+  // 已摘除：src/utils/request.ts（01-06 全局请求层重写后 0 处 explicit-any）。
+  {
+    files: [
+      "src/components/TableSelect/index.vue",
+      "src/components/InputTag/index.vue",
+      "src/components/DictSelect/index.vue",
+      "src/components/Upload/FileUpload.vue",
+      "src/components/WangEditor/index.vue",
+      "src/components/IconSelect/index.vue",
+      "src/utils/download.ts",
+      "src/views/system/user/components/UserImportDialog.vue",
+    ],
+    rules: {
       "@typescript-eslint/no-explicit-any": "off",
     },
   },

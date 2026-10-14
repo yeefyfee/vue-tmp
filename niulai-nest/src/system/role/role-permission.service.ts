@@ -1,14 +1,11 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
+import { Prisma } from "@prisma/client";
+import { PrismaService } from "../../common/prisma/prisma.service";
 import { RedisService } from "../../common/redis/redis.service";
 import { RedisConstants } from "../../common/constants/redis.constants";
-import { SysRoleMenu } from "./entities/sys-role-menu.entity";
-import { SysRole } from "./entities/sys-role.entity";
-import { SysMenu } from "../menu/entities/sys-menu.entity";
 
 /**
- * 角色权限缓存服务
+ * 角色权限缓存服务（Prisma 版）
  *
  * 负责管理角色与权限标识的映射关系，采用 Read-Through 缓存策略：
  * - 优先从 Redis Hash 缓存读取
@@ -18,6 +15,13 @@ import { SysMenu } from "../menu/entities/sys-menu.entity";
  * - Key: system:role:perms
  * - Field: 角色编码
  * - Value: 权限标识数组
+ *
+ * 🔴 **移植要点**：原实现依赖 `SysRoleMenu` 上的 TypeORM 关系（`@ManyToOne(() => SysRole)` /
+ * `@ManyToOne(() => SysMenu)`）做 `innerJoin("rm.role") / innerJoin("rm.menu")`；
+ * 而 Prisma schema **刻意不定义关系/外键**（与原 MySQL 库一致）⇒ 这里改写为**显式 JOIN 的原生 SQL**。
+ * 因为 `sys_role_menu` 有几十万行级别的潜在量级，两次往返查询不如一次 JOIN。
+ *
+ * ⚠️ 原生 SQL 约定（移植约定第 10 条）：列名写**下划线**、参数走 Prisma 的 `${}` 插值（自动参数化，无注入）。
  */
 @Injectable()
 export class RolePermService {
@@ -25,12 +29,7 @@ export class RolePermService {
   private readonly cacheKey = RedisConstants.System.ROLE_PERMS;
 
   constructor(
-    @InjectRepository(SysRoleMenu)
-    private roleMenuRepository: Repository<SysRoleMenu>,
-    @InjectRepository(SysRole)
-    private roleRepository: Repository<SysRole>,
-    @InjectRepository(SysMenu)
-    private menuRepository: Repository<SysMenu>,
+    private readonly prisma: PrismaService,
     private readonly redisService: RedisService
   ) {}
 
@@ -139,32 +138,30 @@ export class RolePermService {
   /**
    * 从数据库获取角色权限列表
    *
+   * 原 TypeORM 版：`role_menu innerJoin role innerJoin menu`（靠实体关系）。
+   * 现改为显式 JOIN 的原生 SQL。
+   *
    * @param roleCode 可选，指定角色编码时只返回该角色的权限
    * @returns 角色权限映射列表
    */
   private async getRolePermsListFromDB(
     roleCode?: string
   ): Promise<{ roleCode: string; perms: string[] }[]> {
-    // 查询角色-菜单关联
-    const queryBuilder = this.roleMenuRepository
-      .createQueryBuilder("rm")
-      .innerJoin("rm.role", "role")
-      .innerJoin("rm.menu", "menu")
-      .where("role.isDeleted = :isDeleted", { isDeleted: 0 })
-      .andWhere("role.status = :status", { status: 1 })
-      .andWhere("menu.type = :menuType", { menuType: "B" }) // 按钮类型
-      .andWhere("menu.perm IS NOT NULL")
-      .select(["role.code AS roleCode", "menu.perm AS perm"]);
+    const rows = await this.prisma.$queryRaw<{ roleCode: string; perm: string }[]>`
+      SELECT r.code AS "roleCode", m.perm AS "perm"
+      FROM sys_role_menu rm
+      INNER JOIN sys_role r ON r.id = rm.role_id
+      INNER JOIN sys_menu m ON m.id = rm.menu_id
+      WHERE r.is_deleted = 0
+        AND r.status = 1
+        AND m.type = 'B'
+        AND m.perm IS NOT NULL
+        ${roleCode ? Prisma.sql`AND r.code = ${roleCode}` : Prisma.empty}
+    `;
 
-    if (roleCode) {
-      queryBuilder.andWhere("role.code = :roleCode", { roleCode });
-    }
-
-    const results = await queryBuilder.getRawMany();
-
-    // 按角色编码分组
+    // 按角色编码分组（保持原实现：`perm` 的顺序 = 数据库返回顺序）
     const rolePermsMap = new Map<string, string[]>();
-    for (const row of results) {
+    for (const row of rows) {
       const code = row.roleCode;
       const perm = row.perm;
       if (!rolePermsMap.has(code)) {
@@ -174,8 +171,8 @@ export class RolePermService {
     }
 
     // 转换为数组返回
-    return Array.from(rolePermsMap.entries()).map(([roleCode, perms]) => ({
-      roleCode,
+    return Array.from(rolePermsMap.entries()).map(([code, perms]) => ({
+      roleCode: code,
       perms,
     }));
   }
@@ -187,30 +184,33 @@ export class RolePermService {
    * @returns 权限标识数组
    */
   private async getRolePermsByRoleCodeFromDB(roleCode: string): Promise<string[]> {
-    const results = await this.roleMenuRepository
-      .createQueryBuilder("rm")
-      .innerJoin("rm.role", "role")
-      .innerJoin("rm.menu", "menu")
-      .where("role.code = :roleCode", { roleCode })
-      .andWhere("role.isDeleted = :isDeleted", { isDeleted: 0 })
-      .andWhere("role.status = :status", { status: 1 })
-      .andWhere("menu.type = :menuType", { menuType: "B" })
-      .andWhere("menu.perm IS NOT NULL")
-      .select("menu.perm", "perm")
-      .getRawMany();
+    const rows = await this.prisma.$queryRaw<{ perm: string }[]>`
+      SELECT m.perm AS "perm"
+      FROM sys_role_menu rm
+      INNER JOIN sys_role r ON r.id = rm.role_id
+      INNER JOIN sys_menu m ON m.id = rm.menu_id
+      WHERE r.code = ${roleCode}
+        AND r.is_deleted = 0
+        AND r.status = 1
+        AND m.type = 'B'
+        AND m.perm IS NOT NULL
+    `;
 
-    return results.map((r) => r.perm);
+    return rows.map((r) => r.perm);
   }
 
   /**
    * 获取所有权限标识（超级管理员使用）
    *
-   * @returns 所有按钮权限标识
+   * 原实现 `menuRepository.find({ where: { type: "B" } })` 没有任何 `isDeleted` 过滤 ——
+   * 这里保持一致，但**并非疏漏**：`sys_menu` 表压根没有 `is_deleted` 列
+   * （见 `sys-menu.entity.ts` 的注释「菜单属于系统元数据，不需要审计字段和逻辑删除」，
+   * 与 `prisma/schema.prisma` 的 `SysMenu` 一致）⇒ 无过滤可选，也不可能存在"已删除菜单"。
    */
   async getAllPerms(): Promise<string[]> {
-    const menus = await this.menuRepository.find({
-      where: { type: "B" },
-      select: ["perm"],
+    const menus = await this.prisma.sysMenu.findMany({
+      where: { menuType: "B" },
+      select: { perm: true },
     });
     return menus.map((m) => m.perm).filter((p): p is string => !!p);
   }

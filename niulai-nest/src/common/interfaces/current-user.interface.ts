@@ -21,4 +21,12 @@ export interface CurrentUserInfo {
   perms?: string[];
   /** 是否为超级管理员 */
   isRoot?: boolean;
+  /**
+   * 所属租户ID（PEL-11 租户隔离基线）
+   *
+   * 由 JWT payload 的 `tenantId` 解析而来（**不接受请求参数传入**）；
+   * 平台级账号（sys_user）当前没有租户归属，值为 `null`。
+   * 租户模型与账号-租户绑定关系见 P0-03-01。
+   */
+  tenantId?: string | null;
 }

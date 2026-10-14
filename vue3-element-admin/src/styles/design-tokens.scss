@@ -1,0 +1,28 @@
+/**
+ * PeluVida 设计令牌（AUTO-GENERATED —— 勿手改）
+ * 来源：@peluvida/shared 的 SEMANTIC_COLORS / FONT_SIZE_WEB（决策 A5 唯一来源）
+ * 重新生成：node scripts/generate-design-tokens.mjs
+ */
+
+:root {
+  --peluvida-color-info: #2563eb;
+  --peluvida-color-success: #16a34a;
+  --peluvida-color-warning: #d97706;
+  --peluvida-color-danger: #dc2626;
+  --peluvida-color-neutral: #6b7280;
+  --el-color-info: #2563eb;
+  --el-color-success: #16a34a;
+  --el-color-warning: #d97706;
+  --el-color-danger: #dc2626;
+  --el-color-error: #dc2626;
+  --el-font-size-base: 14px;
+  --el-font-size-small: 12px;
+  --el-font-size-medium: 16px;
+  --el-font-size-large: 20px;
+
+  /* 业务侧请优先使用语义 token（--peluvida-*），EP 变量仅作组件对齐 */
+  --peluvida-font-page-title: 20px;
+  --peluvida-font-section-title: 16px;
+  --peluvida-font-body: 14px;
+  --peluvida-font-helper: 12px;
+}

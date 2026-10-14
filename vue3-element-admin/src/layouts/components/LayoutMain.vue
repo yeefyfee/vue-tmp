@@ -1,14 +1,17 @@
 <template>
   <section class="layout-content" :style="{ height: appMainHeight }">
-    <router-view>
-      <template #default="{ Component, route }">
-        <transition :name="transitionName" mode="out-in">
-          <keep-alive :include="cachedViews">
-            <component :is="currentComponent(Component, route)" :key="route.fullPath" />
-          </keep-alive>
-        </transition>
-      </template>
-    </router-view>
+    <!-- 中央工作区：最大宽度 1440px 居中渲染（01-03） -->
+    <div class="layout-content__inner">
+      <router-view>
+        <template #default="{ Component, route }">
+          <transition :name="transitionName" mode="out-in">
+            <keep-alive :include="cachedViews">
+              <component :is="currentComponent(Component, route)" :key="route.fullPath" />
+            </keep-alive>
+          </transition>
+        </template>
+      </router-view>
+    </div>
 
     <el-backtop target=".layout-content">
       <div class="i-svg:backtop w-6 h-6" />
@@ -76,6 +79,15 @@ const transitionName = computed(() => {
   position: relative;
   overflow-y: auto;
   background-color: var(--page-bg);
+
+  /* 中央工作区：超宽屏下最大 1440px 居中（01-03） */
+  &__inner {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: $workspace-max-width;
+    height: 100%;
+    margin: 0 auto;
+  }
 
   /* fade */
   .fade-enter-active,

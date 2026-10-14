@@ -2,6 +2,9 @@
  * 样式总入口
  */
 
+// 0. PeluVida 设计令牌（CROSS-16，AUTO-GENERATED，来源 @peluvida/shared）
+@use "./design-tokens";
+
 // 1. 基础与主题层
 @use "./theme";
 @use "./reset";

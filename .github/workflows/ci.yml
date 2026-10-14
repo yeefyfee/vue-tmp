@@ -1,0 +1,145 @@
+# PeluVida OS CI 基础流水线（CROSS-04 + CROSS-15）
+#
+# 五道关口：Lint → Typecheck → Unit Test → Build → Contract，全部经 turbo 编排（依赖关系见 turbo.json）。
+# 分支保护（PR 审批 + 必过检查）见 .github/BRANCH_PROTECTION.md。
+#
+# 说明：
+# - 仓库根 pnpm-lock.yaml 生成后，install 步骤自动走 --frozen-lockfile（当前兼容无锁文件阶段）。
+# - jest 单测为纯 mock（无 DB/Redis 依赖）；但 Contract 关口（CROSS-15）的 OpenAPI 快照导出
+#   会经 NestFactory 全量拉起 AppModule（Prisma onModuleInit 探活），因此 job 级挂
+#   postgres:16 + redis:7 service 容器。
+# - 需要真库的 verify-* 校验脚本在本地/QA 阶段执行，不进 CI。
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint / Typecheck / Test / Build / Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    # CROSS-15：快照导出会真实拉起 AppModule（Prisma 探活 / Redis 客户端初始化）
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: peluvida
+          POSTGRES_PASSWORD: peluvida_ci
+          POSTGRES_DB: peluvida_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U peluvida"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    # 12 个必需键（src/config/env.validation.ts）+ OSS local 形态
+    env:
+      NODE_ENV: test
+      APP_PORT: "8000"
+      PG_HOST: 127.0.0.1
+      PG_PORT: "5432"
+      PG_USER: peluvida
+      PG_PASSWORD: peluvida_ci
+      PG_DB: peluvida_ci
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      JWT_SECRET_KEY: ci-only-secret-key-0123456789abcdef0123456789abcdef
+      JWT_EXPIRES_IN: "7200"
+      JWT_ISSUER: peluvida-ci
+      OSS_TYPE: local
+      OSS_LOCAL_STORAGE_PATH: /tmp/peluvida-oss
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # turbo needs git history for affected computation
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+          else
+            pnpm install
+          fi
+
+      # shared 是全栈依赖源（设计令牌/金额/分页/Redis 键规范），turbo 也会经 ^build 保证，
+      # 这里显式构建一次，让后续步骤的类型解析都吃到 dist 产物
+      - name: Build shared packages
+        run: pnpm shared:build
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      # CROSS-05 红线检查（R01–R11）：PR 下扫描 base..HEAD 变更；push main 下全量扫描兜底
+      - name: Red-line checks (R01–R11)
+        run: |
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            node scripts/check-red-lines.mjs --base ${{ github.event.pull_request.base.sha }}
+          else
+            node scripts/check-red-lines.mjs --all
+          fi
+
+      - name: Build
+        run: pnpm build
+
+      # 质量门禁：构建产物完整性（dist/main.js 存在 + 无 dist/src 旁路产物）
+      - name: Verify backend build artifacts
+        run: |
+          test -f niulai-nest/dist/main.js || { echo "❌ niulai-nest/dist/main.js 缺失"; exit 1; }
+          test ! -d niulai-nest/dist/src || { echo "❌ 出现 dist/src（prisma.config.ts 未被 tsconfig.build 排除）"; exit 1; }
+          echo "✅ 后端构建产物完整"
+
+      # ── CROSS-15：契约 ↔ 实现一致性 ──────────────────────────
+      - name: Contract structure validation
+        run: node packages/api-contract/scripts/validate.mjs
+
+      # 从实现重新导出快照（覆盖工作区副本），随后 diff 检查提交的快照是否过期
+      - name: Export OpenAPI snapshot
+        run: pnpm --filter niulai-nest contract:export
+
+      - name: Contract snapshot must be up to date
+        run: |
+          if ! git diff --exit-code packages/api-contract/openapi.export.json; then
+            echo "❌ openapi.export.json 与实现不同步——请在 niulai-nest 运行 pnpm contract:export 并提交新快照"
+            exit 1
+          fi
+
+      - name: Contract ↔ implementation sync
+        run: node packages/api-contract/scripts/check-impl-sync.mjs

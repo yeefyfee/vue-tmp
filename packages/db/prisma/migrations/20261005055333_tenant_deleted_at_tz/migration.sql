@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "tenant" ALTER COLUMN "deleted_at" SET DATA TYPE TIMESTAMPTZ(3);

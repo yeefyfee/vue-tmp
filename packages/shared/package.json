@@ -1,0 +1,38 @@
+{
+  "name": "@peluvida/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PeluVida OS 三端（Web / 员工端 / 宠主端）与后端共享的常量唯一来源：状态机枚举、状态映射、金额 Money、分页契约、设计令牌、权限码",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
+    "type-check": "tsc -p tsconfig.json --noEmit",
+    "pretest": "tsc -p tsconfig.build.json",
+    "test": "node --test test/money.test.cjs test/pagination.test.cjs test/status.test.cjs test/redis-key.test.cjs test/tenant-capability.test.cjs test/audit.test.cjs test/store-config.test.cjs test/timeline.test.cjs test/media.test.cjs",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "lint": "eslint \"src/**/*.ts\""
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "eslint": "^9.39.2",
+    "@eslint/js": "^9.39.2",
+    "globals": "^16.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.53.0",
+    "@typescript-eslint/parser": "^8.53.0"
+  }
+}

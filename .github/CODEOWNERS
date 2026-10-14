@@ -1,0 +1,29 @@
+# PeluVida OS CODEOWNERS（CROSS-04 / 决策：支付 / 权限 / 多租户改动需 2 人审批）
+#
+# 用法：CODEOWNERS 指定「必须获得哪些 owner 的 review」；「2 人审批」= 分支保护中
+# `required_approving_review_count: 2` + `require_code_owner_reviews: true` 的组合
+# （配置步骤见 .github/BRANCH_PROTECTION.md）。
+#
+# ⚠️ 当前为独立开发者单人仓库：所有路径暂归 @yeefyfee。
+#    团队扩员后，将支付 / 权限 / 多租户路径的第二责任人补进对应行
+#    （例：/niulai-nest/src/**/payment/ @yeefyfee @payment-owner），
+#    并确认分支保护的 required_approving_review_count 已设为 2。
+
+# ── 支付域（涉及资金，最高敏感级）──────────────────────────
+/niulai-nest/src/**/payment/ @yeefyfee
+/niulai-nest/src/pay/ @yeefyfee
+/packages/api-contract/**/payment* @yeefyfee
+
+# ── 权限与数据权限 ────────────────────────────────────────
+/niulai-nest/src/common/guards/ @yeefyfee
+/niulai-nest/src/common/prisma/data-scope.extension.ts @yeefyfee
+/niulai-nest/src/common/interceptors/data-permission.interceptor.ts @yeefyfee
+/niulai-nest/src/common/decorators/data-permission.decorator.ts @yeefyfee
+/niulai-nest/src/auth/ @yeefyfee
+
+# ── 多租户隔离 ────────────────────────────────────────────
+/niulai-nest/src/tenant/ @yeefyfee
+
+# ── 共享包与契约（三端共用，改动影响面全局）────────────────
+/packages/shared/ @yeefyfee
+/packages/api-contract/ @yeefyfee

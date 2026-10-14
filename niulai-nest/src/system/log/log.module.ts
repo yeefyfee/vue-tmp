@@ -1,14 +1,11 @@
 ﻿import { Module } from "@nestjs/common";
 import { APP_INTERCEPTOR } from "@nestjs/core";
-import { TypeOrmModule } from "@nestjs/typeorm";
 import { LogService } from "./log.service";
 import { LogController } from "./log.controller";
-import { SysLog } from "./entities/sys-log.entity";
 import { LoggingInterceptor } from "./logging.interceptor";
-import { SysUser } from "../user/entities/sys-user.entity";
 
 @Module({
-  imports: [TypeOrmModule.forFeature([SysLog, SysUser])],
+  // PrismaService 由全局 PrismaModule 提供，无需再导入 TypeOrmModule.forFeature
   controllers: [LogController],
   providers: [
     LogService,

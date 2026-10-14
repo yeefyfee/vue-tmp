@@ -1,0 +1,12 @@
+{
+  "name": "@peluvida/db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PeluVida OS · Prisma schema 唯一存放地（CROSS-08）：schema 基线 + 迁移历史 + 公共字段口径。CLI 工具链经由 niulai-nest/prisma.config.ts 提供连接串与环境加载。",
+  "devDependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "bcrypt": "^6.0.0",
+    "prisma": "^7.10.0"
+  }
+}

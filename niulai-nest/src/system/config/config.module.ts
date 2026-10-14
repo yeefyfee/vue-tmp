@@ -1,12 +1,14 @@
 import { Module } from "@nestjs/common";
-import { TypeOrmModule } from "@nestjs/typeorm";
 import { ConfigController } from "./config.controller";
 import { ConfigService } from "./config.service";
-import { SysConfig } from "./entities/sys-config.entity";
 import { RedisSharedModule } from "../../common/redis/redis.module";
 
+/**
+ * 系统配置模块
+ * 数据访问走全局 PrismaModule 暴露的 PrismaService（PEL-10c，已由 TypeORM 迁移至 Prisma）。
+ */
 @Module({
-  imports: [TypeOrmModule.forFeature([SysConfig]), RedisSharedModule],
+  imports: [RedisSharedModule],
   controllers: [ConfigController],
   providers: [ConfigService],
   exports: [ConfigService],

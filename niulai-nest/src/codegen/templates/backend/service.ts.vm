@@ -1,113 +1,134 @@
+## Velocity 注释（## 开头的行不进产物）：
+##  - 本模板已从 TypeORM 形态（InjectRepository / Repository / createQueryBuilder）
+##    改为 Prisma 形态（注入 PrismaService + 构造 where 对象）。
+##  - 历史说明只写在这里，**不要写进产物** —— 校验脚本有硬断言「生成物不得出现 typeorm 字样」。
+##  - ⚠️ 独立占行的指令一律以 `##` 收尾，否则 Velocity 会吃掉该行换行，
+##    把本该另起一行的代码粘到上一行尾（既有模板 dto-form.ts.vm 就是这个写法）。
 /**
- * ${businessName} 服务层
+ * ${businessName} 服务层（Prisma 形态）
+ *
+ * 生成约定（与项目已迁移的系统模块保持一致）：
+ *  - 数据访问走全局 `PrismaService`；`PrismaModule` 是 `@Global`，模块里无需 import；
+ *  - 逻辑删除**显式**过滤 `isDeleted: 0`（Prisma 没有软删扩展）；
+ *  - 主键一律过 `toBigInt()`，禁止裸写 `BigInt(x)`；
+ *  - 单条受限读取用 `findFirst` 而非 `findUnique`（数据权限扩展只作用于读操作，
+ *    且刻意排除 `findUnique*` —— 其 where 仅接受唯一键）；
+ *  - 审计字段由 `auditOnCreate()` / `auditOnUpdate()` 显式填充；
+ *  - 分页返回 `{ data, page }`，由全局 `ResponseInterceptor` 改写成
+ *    `list / total / page / page_size`。
  */
 import { Injectable } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { In, Repository } from "typeorm";
-import { ${entityName} } from "./entities/${tableKebab}.entity";
+import { Prisma } from "@prisma/client";
+import { PrismaService } from "../../common/prisma/prisma.service";
+import { toBigInt } from "../../common/prisma/prisma-ids";
+import { auditOnCreate, auditOnUpdate } from "../../common/prisma/audit.util";
 import { ${entityName}QueryDto } from "./dto/${entityKebab}-query.dto";
 import { Create${entityName}Dto } from "./dto/create-${entityKebab}.dto";
 import { Update${entityName}Dto } from "./dto/update-${entityKebab}.dto";
 
 @Injectable()
 export class ${entityName}Service {
-  constructor(
-    @InjectRepository(${entityName})
-    private readonly ${entityLowerCamel}Repository: Repository<${entityName}>
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   /**
    * ${businessName} 分页列表
    */
   async get${entityName}Page(query: ${entityName}QueryDto) {
     const pageNumSafe = Number(query.pageNum) > 0 ? Number(query.pageNum) : 1;
-    const pageSizeSafe = Number(query.pageSize) > 0 ? Number(query.pageSize) : 10;
+    const pageSizeSafe = Number(query.pageSize) > 0 ? Number(query.pageSize) : 20;
 
-    const queryBuilder = this.${entityLowerCamel}Repository.createQueryBuilder("${entityLowerCamel}");
-    queryBuilder.where("${entityLowerCamel}.isDeleted = :isDeleted", { isDeleted: 0 });
-#foreach($fieldConfig in $fieldConfigs)
-#if($fieldConfig.isShowInQuery)
+    // 生成器无法预知目标模型的字段类型，这里用宽松类型累积条件；
+    // 模型进 schema.prisma 后可改为 `Prisma.${entityName}WhereInput` 以获得强类型提示。
+    const where: any = { isDeleted: 0 };
+#foreach($fieldConfig in $fieldConfigs)##
+#if($fieldConfig.isShowInQuery)##
     if (
       query.${fieldConfig.fieldName} !== undefined &&
       query.${fieldConfig.fieldName} !== null &&
       query.${fieldConfig.fieldName} !== ""
     ) {
-  #if($fieldConfig.queryType == "LIKE")
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} LIKE :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: "%" + query.${fieldConfig.fieldName} + "%",
-      });
-  #elseif($fieldConfig.queryType == "LIKE_LEFT")
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} LIKE :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: "%" + query.${fieldConfig.fieldName},
-      });
-  #elseif($fieldConfig.queryType == "LIKE_RIGHT")
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} LIKE :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName} + "%",
-      });
-  #elseif($fieldConfig.queryType == "IN")
+#if($fieldConfig.queryType == "LIKE")##
+      // 旧库 MySQL 的 LIKE 不区分大小写；PG 区分 ⇒ 用 insensitive 对齐（PEL-10 约定 15）
+      where.${fieldConfig.fieldName} = {
+        contains: String(query.${fieldConfig.fieldName}),
+        mode: "insensitive",
+      };
+#elseif($fieldConfig.queryType == "LIKE_LEFT")##
+      // 原语义 `LIKE '%值'`（以该值结尾）
+      where.${fieldConfig.fieldName} = {
+        endsWith: String(query.${fieldConfig.fieldName}),
+        mode: "insensitive",
+      };
+#elseif($fieldConfig.queryType == "LIKE_RIGHT")##
+      // 原语义 `LIKE '值%'`（以该值开头）
+      where.${fieldConfig.fieldName} = {
+        startsWith: String(query.${fieldConfig.fieldName}),
+        mode: "insensitive",
+      };
+#elseif($fieldConfig.queryType == "IN")##
       const ${fieldConfig.fieldName}List = Array.isArray(query.${fieldConfig.fieldName})
         ? query.${fieldConfig.fieldName}
-        : String(query.${fieldConfig.fieldName}).split(",").filter(Boolean);
+        : String(query.${fieldConfig.fieldName})
+            .split(",")
+            .filter(Boolean);
       if (${fieldConfig.fieldName}List.length) {
-        queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} IN (:...${fieldConfig.fieldName}List)", {
-          ${fieldConfig.fieldName}List,
-        });
+        where.${fieldConfig.fieldName} = { in: ${fieldConfig.fieldName}List };
       }
-  #elseif($fieldConfig.queryType == "BETWEEN")
+#elseif($fieldConfig.queryType == "BETWEEN")##
       const ${fieldConfig.fieldName}Range = query.${fieldConfig.fieldName};
       if (Array.isArray(${fieldConfig.fieldName}Range) && ${fieldConfig.fieldName}Range.length === 2) {
-        queryBuilder.andWhere(
-          "${entityLowerCamel}.${fieldConfig.fieldName} BETWEEN :${fieldConfig.fieldName}Start AND :${fieldConfig.fieldName}End",
-          {
-            ${fieldConfig.fieldName}Start: ${fieldConfig.fieldName}Range[0],
-            ${fieldConfig.fieldName}End: ${fieldConfig.fieldName}Range[1],
-          }
-        );
+        where.${fieldConfig.fieldName} = {
+          gte: ${fieldConfig.fieldName}Range[0],
+          lte: ${fieldConfig.fieldName}Range[1],
+        };
       }
-  #elseif($fieldConfig.queryType == "GT")
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} > :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
-      });
-  #elseif($fieldConfig.queryType == "GE")
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} >= :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
-      });
-  #elseif($fieldConfig.queryType == "LT")
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} < :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
-      });
-  #elseif($fieldConfig.queryType == "LE")
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} <= :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
-      });
-  #elseif($fieldConfig.queryType == "NE")
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} != :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
-      });
-  #else
-      queryBuilder.andWhere("${entityLowerCamel}.${fieldConfig.fieldName} = :${fieldConfig.fieldName}", {
-        ${fieldConfig.fieldName}: query.${fieldConfig.fieldName},
-      });
-  #end
+#elseif($fieldConfig.queryType == "GT")##
+      where.${fieldConfig.fieldName} = { gt: query.${fieldConfig.fieldName} };
+#elseif($fieldConfig.queryType == "GE")##
+      where.${fieldConfig.fieldName} = { gte: query.${fieldConfig.fieldName} };
+#elseif($fieldConfig.queryType == "LT")##
+      where.${fieldConfig.fieldName} = { lt: query.${fieldConfig.fieldName} };
+#elseif($fieldConfig.queryType == "LE")##
+      where.${fieldConfig.fieldName} = { lte: query.${fieldConfig.fieldName} };
+#elseif($fieldConfig.queryType == "NE")##
+      where.${fieldConfig.fieldName} = { not: query.${fieldConfig.fieldName} };
+#else##
+      where.${fieldConfig.fieldName} = query.${fieldConfig.fieldName};
+#end##
     }
-#end
-#end
+#end##
+#end##
 
-    queryBuilder.orderBy("${entityLowerCamel}.id", "DESC");
-    const [list, total] = await queryBuilder
-      .skip((pageNumSafe - 1) * pageSizeSafe)
-      .take(pageSizeSafe)
-      .getManyAndCount();
+    const [list, total] = await Promise.all([
+      this.prisma.${entityLowerCamel}.findMany({
+        where,
+        orderBy: { id: "desc" },
+        skip: (pageNumSafe - 1) * pageSizeSafe,
+        take: pageSizeSafe,
+      }),
+      this.prisma.${entityLowerCamel}.count({ where }),
+    ]);
 
-    return { list, total };
+    return {
+      data: list,
+      page: {
+        pageNum: pageNumSafe,
+        pageSize: pageSizeSafe,
+        total,
+      },
+    };
   }
 
   /**
    * 获取 ${businessName} 表单数据
    */
   async get${entityName}FormData(id: string) {
-    return await this.${entityLowerCamel}Repository.findOne({
-      where: { id: id.toString(), isDeleted: 0 }
+    const idBig = toBigInt(id);
+    if (idBig === null) {
+      return null;
+    }
+    return await this.prisma.${entityLowerCamel}.findFirst({
+      where: { id: idBig, isDeleted: 0 },
     });
   }
 
@@ -115,49 +136,61 @@ export class ${entityName}Service {
    * 新增 ${businessName}
    */
   async create(formData: Create${entityName}Dto) {
-    const entity = this.${entityLowerCamel}Repository.create({
+    const data = {
       ...formData,
       isDeleted: 0,
-    });
+      ...auditOnCreate(),
+    } as unknown as Prisma.${entityName}UncheckedCreateInput;
 
-    await this.${entityLowerCamel}Repository.save(entity);
-    return entity;
+    return await this.prisma.${entityLowerCamel}.create({ data });
   }
 
   /**
    * 修改 ${businessName}
    */
   async update(id: string, formData: Update${entityName}Dto) {
-    const entity = await this.${entityLowerCamel}Repository.findOne({
-      where: { id: id.toString(), isDeleted: 0 }
-    });
-    if (!entity) {
+    const idBig = toBigInt(id);
+    if (idBig === null) {
       return false;
     }
 
-    Object.assign(entity, formData);
+    const exists = await this.prisma.${entityLowerCamel}.findFirst({
+      where: { id: idBig, isDeleted: 0 },
+      select: { id: true },
+    });
+    if (!exists) {
+      return false;
+    }
 
-    await this.${entityLowerCamel}Repository.save(entity);
+    const data = {
+      ...formData,
+      ...auditOnUpdate(),
+    } as unknown as Prisma.${entityName}UncheckedUpdateInput;
+
+    await this.prisma.${entityLowerCamel}.update({ where: { id: idBig }, data });
     return true;
   }
 
   /**
-   * 删除 ${businessName}
+   * 删除 ${businessName}（逻辑删除）
+   *
+   * 注：本项目约定「直接 UPDATE 的写路径要显式刷新审计字段」——
+   * 逻辑删除走的是 updateMany，不在任何自动填充范围内。
    */
   async delete(ids: string) {
     const idList = ids
       .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean);
+      .map((v) => toBigInt(v.trim()))
+      .filter((v): v is bigint => v !== null);
 
     if (!idList.length) {
       return false;
     }
 
-    await this.${entityLowerCamel}Repository.update(
-      { id: In(idList) },
-      { isDeleted: 1 }
-    );
+    await this.prisma.${entityLowerCamel}.updateMany({
+      where: { id: { in: idList } },
+      data: { isDeleted: 1, ...auditOnUpdate() },
+    });
 
     return true;
   }

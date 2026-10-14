@@ -8,13 +8,19 @@ import {
   Inject,
   forwardRef,
   Delete,
+  UseGuards,
 } from "@nestjs/common";
 
 import { AuthService } from "./auth.service";
+import { AuthContextService } from "./auth-context.service";
+import { UserService } from "../system/user/user.service";
 import { LoginRequestDto } from "./dto/login-request.dto";
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { LoginResultDto } from "./dto/login-result.dto";
+import { SwitchContextRequestDto } from "./dto/switch-context.dto";
 import { Public } from "../common/decorators/auth.decorator";
+import { CurrentUser } from "../common/decorators/current-user.decorator";
+import type { CurrentUserInfo } from "../common/interfaces/current-user.interface";
 import { Log } from "../common/decorators/log.decorator";
 import { ActionTypeValue } from "../common/enums/action-type.enum";
 import { LogModuleValue } from "../common/enums/log-module.enum";
@@ -23,6 +29,8 @@ import { BusinessException } from "../common/exceptions/business.exception";
 import { v4 as uuidv4 } from "uuid";
 import { RedisService } from "../common/redis/redis.service";
 import { ErrorCode } from "../common/enums/error-code.enum";
+import { RequireTenant } from "../tenant/decorators/require-tenant.decorator";
+import { TenantContextGuard } from "../tenant/guards/tenant-context.guard";
 
 /**
  * 认证接口控制器
@@ -32,10 +40,55 @@ import { ErrorCode } from "../common/enums/error-code.enum";
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
+    private readonly authContextService: AuthContextService,
+    private readonly userService: UserService,
     private readonly toolsService: ToolsService,
     @Inject(forwardRef(() => RedisService))
     private readonly RedisService: RedisService
   ) {}
+
+  /**
+   * 获取当前登录用户信息（P0-02-06）
+   *
+   * 等价复用 /users/me 的 UserService.findMe（不复制粘贴逻辑），
+   * 消除契约偏差（packages/api-contract README 记录的 /auth/me 未实现）。
+   */
+  @ApiOperation({ summary: "获取当前登录用户信息（等价 /users/me）" })
+  @Get("me")
+  async me(@CurrentUser() currentUser: CurrentUserInfo) {
+    return await this.userService.findMe(currentUser);
+  }
+
+  /**
+   * 当前租户可切换门店列表（P0-02-06 · 切店 UI 数据源）
+   *
+   * 平台级账号（无租户上下文）由 TenantContextGuard fail-closed 拒绝（403 + A0302）。
+   */
+  @ApiOperation({ summary: "当前租户可切换门店列表（启用状态，供切店 UI）" })
+  @Get("organizations")
+  @UseGuards(TenantContextGuard)
+  @RequireTenant()
+  async organizations() {
+    return await this.authContextService.listSwitchableStores();
+  }
+
+  /**
+   * 切换门店上下文（P0-02-06）
+   *
+   * 校验目标门店（存在 / 属当前租户 / 启用，否则 403 + A0212）后，
+   * 签发内嵌 activeStoreId 的新 access token（refresh token 沿用原值，
+   * tokenVersion 语义不变）。平台级账号 403 + A0302。
+   */
+  @ApiOperation({ summary: "切换门店上下文（签发内嵌 activeStoreId 的新 access token）" })
+  @Post("switch-context")
+  @UseGuards(TenantContextGuard)
+  @RequireTenant()
+  async switchContext(
+    @CurrentUser() currentUser: CurrentUserInfo,
+    @Body() switchDto: SwitchContextRequestDto
+  ) {
+    return await this.authContextService.switchStoreContext(currentUser, switchDto.storeId);
+  }
 
   @ApiOperation({ summary: "登录接口" })
   @ApiOkResponse({ type: LoginResultDto })

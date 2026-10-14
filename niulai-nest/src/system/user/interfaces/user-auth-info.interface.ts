@@ -43,6 +43,13 @@ export interface UserAuthInfo {
   deptTreePath?: string;
 
   /**
+   * 所属租户ID（P0-03-01；已字符串化——BigInt 直入 JWT payload 会序列化炸）
+   *
+   * NULL = 平台级账号，不受租户 RLS（PEL-11 口径）
+   */
+  tenantId?: string | null;
+
+  /**
    * 角色编码集合
    */
   roles: string[];

@@ -1,9 +1,4 @@
-import {
-  CanActivate,
-  ExecutionContext,
-  ForbiddenException,
-  Injectable,
-} from "@nestjs/common";
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 
 import { ROOT_ROLE_CODE } from "../constants/role.constant";
@@ -39,10 +34,10 @@ export class PermissionGuard implements CanActivate {
     }
 
     // 读取控制器/方法上声明的权限标识
-    const requiredPerms = this.reflector.getAllAndOverride<string[]>(
-      METADATA.PERMISSIONS,
-      [context.getHandler(), context.getClass()]
-    );
+    const requiredPerms = this.reflector.getAllAndOverride<string[]>(METADATA.PERMISSIONS, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
 
     // 未声明权限则视为不需要鉴权
     if (!requiredPerms?.length) {

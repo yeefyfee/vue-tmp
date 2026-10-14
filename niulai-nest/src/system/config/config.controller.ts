@@ -1,5 +1,7 @@
 ﻿import { Body, Controller, Delete, Get, Param, Post, Put, Query } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
+import { AuditEntityType, AuditAction } from "@peluvida/shared";
+import { Audit } from "../../common/audit/audit.decorator";
 import { Log } from "../../common/decorators/log.decorator";
 import { ActionTypeValue } from "../../common/enums/action-type.enum";
 import { LogModuleValue } from "../../common/enums/log-module.enum";
@@ -28,6 +30,7 @@ export class ConfigController {
 
   @ApiOperation({ summary: "新增系统配置" })
   @Post()
+  @Audit({ entityType: AuditEntityType.CONFIG, action: AuditAction.CREATE })
   async saveConfig(
     @CurrentUser("userId") currentUserId: string,
     @Body() formData: CreateConfigDto
@@ -52,6 +55,7 @@ export class ConfigController {
   @ApiOperation({ summary: "修改系统配置" })
   @Log(LogModuleValue.CONFIG, ActionTypeValue.UPDATE)
   @Put(":id")
+  @Audit({ entityType: AuditEntityType.CONFIG, action: AuditAction.UPDATE })
   async updateConfig(
     @Param("id") id: string,
     @CurrentUser("userId") currentUserId: string,
@@ -64,6 +68,7 @@ export class ConfigController {
   @ApiOperation({ summary: "删除系统配置" })
   @Log(LogModuleValue.CONFIG, ActionTypeValue.DELETE)
   @Delete(":id")
+  @Audit({ entityType: AuditEntityType.CONFIG, action: AuditAction.DELETE })
   async deleteConfig(@Param("id") id: string) {
     await this.configService.deleteConfig(id);
     return { success: true };

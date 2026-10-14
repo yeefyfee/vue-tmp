@@ -1,14 +1,16 @@
+## Velocity 注释：本模板已从 TypeORM 形态改为 Prisma 形态
+##  - 去掉了 TypeOrmModule.forFeature([...])（PrismaModule 是 @Global，无需 import）
+##  - 去掉了 TypeORM 实体 import（模型由 schema.prisma 单一来源）
+##  - ⚠️ 历史说明只放在这里（##），不要写进产物 ——
+##    校验脚本有一条硬断言「生成物中不得出现 typeorm 字样」。
 /**
  * ${businessName} 模块
  */
 import { Module } from "@nestjs/common";
-import { TypeOrmModule } from "@nestjs/typeorm";
 import { ${entityName}Service } from "./${entityKebab}.service";
 import { ${entityName}Controller } from "./${entityKebab}.controller";
-import { ${entityName} } from "./entities/${tableKebab}.entity";
 
 @Module({
-  imports: [TypeOrmModule.forFeature([${entityName}])],
   controllers: [${entityName}Controller],
   providers: [${entityName}Service],
   exports: [${entityName}Service],

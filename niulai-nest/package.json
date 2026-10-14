@@ -24,7 +24,35 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "verify:data-scope": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-data-scope.ts",
+    "verify:config": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-config-module.ts",
+    "verify:log": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-log-module.ts",
+    "verify:dept": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-dept-module.ts",
+    "verify:dict": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-dict-module.ts",
+    "verify:role": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-role-module.ts",
+    "verify:menu": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-menu-module.ts",
+    "verify:user": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-user-module.ts",
+    "verify:codegen": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-codegen-module.ts",
+    "verify:tenant": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-tenant-baseline.ts",
+    "verify:tenant-rls": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-tenant-rls.ts",
+    "audit:ensure-partitions": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/ensure-audit-partitions.ts",
+    "audit:archive-partition": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/archive-audit-partition.ts --month=",
+    "audit:verify-partitions": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-audit-partitions.ts",
+    "timeline:ensure-partitions": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/ensure-timeline-partitions.ts",
+    "timeline:verify-partitions": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-timeline-partitions.ts",
+    "pet:scan-health-expiry": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/scan-health-expiry.ts",
+    "pet:verify-reminder": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/verify-pet-health-reminder.ts",
+    "contract:export": "node ./node_modules/ts-node/dist/bin.js -r tsconfig-paths/register scripts/export-openapi.ts",
+    "verify:datetime": "node scripts/verify-datetime-semantics.mjs",
+    "audit:schema": "node scripts/audit-schema-fidelity.mjs",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "prisma:format": "prisma format",
+    "type-check": "tsc --noEmit -p tsconfig.json",
+    "db:seed": "node ./node_modules/ts-node/dist/bin.js --transpile-only -O \"{\"module\":\"commonjs\",\"moduleResolution\":\"node\",\"esModuleInterop\":true,\"target\":\"ES2021\"}\" ../packages/db/prisma/seed.ts"
   },
   "dependencies": {
     "@alicloud/ocr-api20210707": "^3.1.3",
@@ -39,12 +67,15 @@
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.1.11",
     "@nestjs/swagger": "^11.2.5",
-    "@nestjs/typeorm": "^11.0.0",
+    "@peluvida/shared": "workspace:*",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
     "@types/passport-jwt": "^4.0.1",
     "@types/ws": "^8.18.1",
     "ali-oss": "^6.23.0",
     "axios": "^1.13.6",
     "bcrypt": "^6.0.0",
+    "bullmq": "6.3.11",
     "chalk": "^4.1.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.3",
@@ -56,7 +87,6 @@
     "jszip": "^3.10.1",
     "minio": "^8.0.6",
     "multer": "1.4.5-lts.2",
-    "mysql2": "^3.16.0",
     "nest-winston": "^1.10.2",
     "npm": "^11.7.0",
     "passport-jwt": "^4.0.1",
@@ -65,7 +95,6 @@
     "rxjs": "^7.8.2",
     "svg-captcha": "^1.4.0",
     "swagger-ui-express": "^5.0.1",
-    "typeorm": "^0.3.28",
     "uuid": "^9.0.1",
     "velocityjs": "^2.1.5",
     "winston": "^3.19.0",
@@ -94,6 +123,7 @@
     "globals": "^16.5.0",
     "jest": "^29.7.0",
     "prettier": "^3.7.4",
+    "prisma": "^7.10.0",
     "source-map-support": "^0.5.21",
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.6",
@@ -109,12 +139,19 @@
       "ts"
     ],
     "rootDir": "src",
+    "moduleNameMapper": {
+      "^@/(.*)$": "<rootDir>/$1"
+    },
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
+      "^.+\\.ts$": "ts-jest"
     },
+    "transformIgnorePatterns": [
+      "/node_modules/",
+      "packages[/\\\\]shared[/\\\\]dist[/\\\\]"
+    ],
     "collectCoverageFrom": [
-      "**/*.(t|j)s"
+      "**/*.ts"
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"

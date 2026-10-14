@@ -21,6 +21,8 @@ import { CreateUserDto } from "./dto/create-user.dto";
 import { UpdateUserDto } from "./dto/update-user.dto";
 import { UserQueryDto } from "./dto/user-query.dto";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
+import { AuditEntityType, AuditAction } from "@peluvida/shared";
+import { Audit } from "../../common/audit/audit.decorator";
 import { BusinessException } from "../../common/exceptions/business.exception";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { CurrentUserInfo } from "../../common/interfaces/current-user.interface";
@@ -94,7 +96,14 @@ export class UserController {
   @ApiOperation({ summary: "导出用户" })
   @Get("export")
   @Permissions("sys:user:export")
+  // 批量导出 = 数据外泄通道，审计留痕（entityId 无路由参数落空串，仅记操作）
+  @Audit({ entityType: AuditEntityType.USER, action: AuditAction.EXPORT })
   @DataPermission({
+    // Prisma 形态（生效中）
+    model: "SysUser",
+    deptField: "deptId",
+    ownerField: "createBy",
+    // TypeORM 遗留形态（摘除 TypeORM 后删除）
     deptAlias: "user",
     deptIdColumnName: "dept_id",
     userAlias: "user",
@@ -106,7 +115,8 @@ export class UserController {
       query.deptId,
       query.keywords,
       query.status,
-      query.createTime
+      query.createTime,
+      query.includeRoot
     );
 
     const headers = [
@@ -157,6 +167,7 @@ export class UserController {
   @Log(LogModuleValue.USER, ActionTypeValue.INSERT)
   @Post()
   @Permissions("sys:user:create")
+  @Audit({ entityType: AuditEntityType.USER, action: AuditAction.CREATE })
   async createUser(@Body() createUserDto: CreateUserDto) {
     return await this.userService.create(createUserDto);
   }
@@ -172,14 +183,21 @@ export class UserController {
   @Log(LogModuleValue.USER, ActionTypeValue.UPDATE)
   @Put(":id")
   @Permissions("sys:user:update")
-  async updateUser(@Param("id") id: string, @Body() updateUserDto: UpdateUserDto) {
-    return await this.userService.update(id, updateUserDto);
+  @Audit({ entityType: AuditEntityType.USER, action: AuditAction.UPDATE })
+  async updateUser(
+    @Param("id") id: string,
+    @Body() updateUserDto: UpdateUserDto,
+    @CurrentUser() currentUser: CurrentUserInfo
+  ) {
+    // 传当前登录用户 id 供服务层做「不能改自己的角色 / 不能停用自己」的自我保护
+    return await this.userService.update(id, updateUserDto, currentUser?.userId);
   }
 
   @ApiOperation({ summary: "删除用户" })
   @Log(LogModuleValue.USER, ActionTypeValue.DELETE)
   @Delete(":ids")
   @Permissions("sys:user:delete")
+  @Audit({ entityType: AuditEntityType.USER, action: AuditAction.DELETE })
   async deleteUsers(@Param("ids") ids: string) {
     const idArray = ids
       .split(",")
@@ -205,6 +223,8 @@ export class UserController {
   @Log(LogModuleValue.USER, ActionTypeValue.UPDATE)
   @Patch(":userId/status")
   @Permissions("sys:user:update")
+  // 启用/停用由 query.status 决定，静态元数据无法区分，统一记 UPDATE
+  @Audit({ entityType: AuditEntityType.USER, action: AuditAction.UPDATE })
   async updateUserStatus(@Param("userId") userId: string, @Query("status") status: number) {
     return await this.userService.updateUserStatus(userId, status);
   }
@@ -213,6 +233,8 @@ export class UserController {
   @Log(LogModuleValue.USER, ActionTypeValue.RESET_PASSWORD)
   @Put(":userId/password/reset")
   @Permissions("sys:user:reset-password")
+  // 凭据重置属关键留痕操作（无专属动作值，记 UPDATE）
+  @Audit({ entityType: AuditEntityType.USER, action: AuditAction.UPDATE })
   async resetUserPassword(@Param("userId") userId: string, @Query("password") password: string) {
     return await this.userService.resetUserPassword(userId, password);
   }
@@ -283,6 +305,11 @@ export class UserController {
   @Get()
   @Permissions("sys:user:list")
   @DataPermission({
+    // Prisma 形态（生效中）
+    model: "SysUser",
+    deptField: "deptId",
+    ownerField: "createBy",
+    // TypeORM 遗留形态（摘除 TypeORM 后删除）
     deptAlias: "user",
     deptIdColumnName: "dept_id",
     userAlias: "user",
@@ -304,7 +331,8 @@ export class UserController {
       query.deptId,
       query.keywords,
       query.status,
-      query.createTime
+      query.createTime,
+      query.includeRoot
     );
   }
 }

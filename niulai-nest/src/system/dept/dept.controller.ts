@@ -45,6 +45,11 @@ export class DeptController {
   @Get()
   @SetMetadata("resource", "sys_dept")
   @DataPermission({
+    // Prisma 形态（生效中）
+    model: "SysDept",
+    deptField: "id",
+    ownerField: "createBy",
+    // TypeORM 遗留形态（摘除 TypeORM 后删除）
     deptAlias: "dept",
     deptIdColumnName: "id",
     userAlias: "dept",

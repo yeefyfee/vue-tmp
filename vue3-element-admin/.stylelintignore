@@ -1,4 +1,7 @@
 dist
+dist_bak*
+dist_stale_bak*
+_dist_bak*
 node_modules
 public
 .husky

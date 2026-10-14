@@ -84,3 +84,71 @@ export function formatCurrency(amount: number, decimals: number = 2): string {
   const formatted = amount.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return "¥" + formatted;
 }
+
+/** 时间列相对表达标签（由调用方注入 i18n 文案，工具层不持有多语言） */
+export interface RelativeDateLabels {
+  /** 今天 */
+  today: string;
+  /** 昨天 */
+  yesterday: string;
+  /** 前天 */
+  beforeYesterday: string;
+}
+
+const DEFAULT_RELATIVE_LABELS: RelativeDateLabels = {
+  today: "今天",
+  yesterday: "昨天",
+  beforeYesterday: "前天",
+};
+
+/** 一天毫秒数 */
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 格式化列表时间列（PRD《Web规范》§表格规范 第 4 条）
+ *
+ * 口径：统一展示 `YYYY-MM-DD HH:mm`，**三天内**改用相对表达（今天 / 昨天 / 前天 + HH:mm）。
+ *
+ * 实现要点：
+ *  · 后端时间已按应用时区序列化为 `yyyy-MM-dd HH:mm:ss`（`ResponseInterceptor`），
+ *    故按字符串取年月日时分，**不做时区换算**（避免 `Date.parse` 对无时区串的隐式 UTC 解读）；
+ *  · 天数差以「本地零点」为基准计算，跨夏令时/跨月不会错位；
+ *  · 无法识别的输入原样返回，不产生 `Invalid Date`。
+ *
+ * @param value 时间字符串（`yyyy-MM-dd HH:mm:ss` / ISO 8601）
+ * @param labels 相对表达文案（多语言由调用方注入）
+ *
+ * @example
+ * ```ts
+ * formatTableDateTime("2026-10-09 14:30:00");  // "今天 14:30"
+ * formatTableDateTime("2026-10-08 09:05:00");  // "昨天 09:05"
+ * formatTableDateTime("2026-09-01 09:05:00");  // "2026-09-01 09:05"
+ * ```
+ */
+export function formatTableDateTime(
+  value?: string | number | null,
+  labels: Partial<RelativeDateLabels> = {}
+): string {
+  if (value === undefined || value === null || value === "") return "-";
+
+  const raw = String(value);
+  const matched = raw.replace("T", " ").match(/^(\d{4})-(\d{2})-(\d{2})[ ]?(\d{2}):(\d{2})/);
+  if (!matched) return raw;
+
+  const [, year, month, day, hour, minute] = matched;
+  const absolute = `${year}-${month}-${day} ${hour}:${minute}`;
+
+  const target = new Date(Number(year), Number(month) - 1, Number(day));
+  if (Number.isNaN(target.getTime())) return absolute;
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diffDays = Math.round((startOfToday.getTime() - target.getTime()) / ONE_DAY_MS);
+  const labels_ = { ...DEFAULT_RELATIVE_LABELS, ...labels };
+
+  if (diffDays === 0) return `${labels_.today} ${hour}:${minute}`;
+  if (diffDays === 1) return `${labels_.yesterday} ${hour}:${minute}`;
+  if (diffDays === 2) return `${labels_.beforeYesterday} ${hour}:${minute}`;
+
+  return absolute;
+}

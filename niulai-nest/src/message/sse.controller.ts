@@ -1,4 +1,4 @@
-import { Controller, Get, Req, Res, Query } from "@nestjs/common";
+import { Controller, Get, Req, Res } from "@nestjs/common";
 import { ApiTags, ApiOperation, ApiBearerAuth } from "@nestjs/swagger";
 import { Request, Response } from "express";
 import { SseService } from "./sse.service";
@@ -54,12 +54,16 @@ export class SseController {
         complete: () => {
           try {
             res.end();
-          } catch (_e) {}
+          } catch {
+            // 连接已断开时的 res.end 异常可安全忽略
+          }
         },
       };
 
       const registry = (this.sseService as any).sessionRegistry;
-      registry.userConnected(username, emitter);
+      // 会话携带租户归属（JWT tenantId），供后续租户级定向推送（如 dashboard 变更）
+      const tenantId: string | null = payload.tenantId ? String(payload.tenantId) : null;
+      registry.userConnected(username, emitter, tenantId);
 
       sendEvent("online-count", registry.getOnlineUserCount());
 

@@ -8,7 +8,8 @@
       <div :class="{ 'has-logo': showLogo }" class="layout-sidebar__inner">
         <LayoutLogo v-if="showLogo" :collapse="!isSidebarOpen" />
         <el-scrollbar>
-          <LayoutSidebar :data="routes" base-path="" />
+          <!-- grouped：左侧主导航按「六组一级导航」分组渲染（01-04） -->
+          <LayoutSidebar :data="routes" base-path="" grouped />
         </el-scrollbar>
       </div>
     </div>

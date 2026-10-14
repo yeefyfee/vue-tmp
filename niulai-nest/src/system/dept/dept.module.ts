@@ -1,13 +1,12 @@
 ﻿import { Module, forwardRef } from "@nestjs/common";
-import { TypeOrmModule } from "@nestjs/typeorm";
 import { DeptService } from "./dept.service";
 import { DeptController } from "./dept.controller";
-import { SysDept } from "./entities/sys-dept.entity";
-import { SysUser } from "../user/entities/sys-user.entity";
 import { UserModule } from "../user/user.module";
 
 @Module({
-  imports: [TypeOrmModule.forFeature([SysDept, SysUser]), forwardRef(() => UserModule)],
+  // PrismaService 由全局 PrismaModule 提供，无需 TypeOrmModule.forFeature；
+  // 保留 forwardRef 是因为 UserModule（仍在使用中）反向依赖 DeptService，构成循环引用
+  imports: [forwardRef(() => UserModule)],
   controllers: [DeptController],
   providers: [DeptService],
   exports: [DeptService],
